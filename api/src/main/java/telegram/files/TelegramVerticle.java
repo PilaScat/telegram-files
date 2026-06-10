@@ -724,6 +724,31 @@ public class TelegramVerticle extends AbstractVerticle {
         log.error(e);
     }
 
+    private Future<Void> cleanupOldVerticle(String oldRootPath) {
+        if (oldRootPath.equals(this.rootPath)) {
+            return Future.succeededFuture();
+        }
+        Optional<TelegramVerticle> found = TelegramVerticles.getAll().stream()
+                .filter(v -> v != this && oldRootPath.equals(v.rootPath))
+                .findFirst();
+        if (found.isEmpty()) {
+            return Future.succeededFuture();
+        }
+        TelegramVerticle old = found.get();
+        log.info("[%s] Replacing stale verticle at path: %s".formatted(getRootId(), oldRootPath));
+        TelegramVerticles.remove(old);
+        String deployId = old.deploymentID();
+        if (deployId == null) {
+            return Future.succeededFuture();
+        }
+        return vertx.undeploy(deployId)
+                .recover(e -> {
+                    log.warn("[%s] Could not undeploy stale verticle: %s".formatted(getRootId(), e.getMessage()));
+                    return Future.succeededFuture();
+                })
+                .mapEmpty();
+    }
+
     private void handleSaveAvgSpeed() {
         if (!authorized || telegramRecord == null) return;
         AvgSpeed.SpeedStats speedStats = avgSpeed.getSpeedStats();
@@ -853,6 +878,8 @@ public class TelegramVerticle extends AbstractVerticle {
             case TdApi.AuthorizationStateWaitCode.CONSTRUCTOR:
             case TdApi.AuthorizationStateWaitRegistration.CONSTRUCTOR:
             case TdApi.AuthorizationStateWaitPassword.CONSTRUCTOR:
+            case TdApi.AuthorizationStateWaitPremiumPurchase.CONSTRUCTOR:
+                authorized = false;
                 sendEvent(EventPayload.build(EventPayload.TYPE_AUTHORIZATION, authorizationState));
                 break;
             case TdApi.AuthorizationStateReady.CONSTRUCTOR:
@@ -861,6 +888,23 @@ public class TelegramVerticle extends AbstractVerticle {
                     client.execute(new TdApi.GetMe())
                             .compose(user ->
                                     DataVerticle.telegramRepository.create(new TelegramRecord(user.id, user.firstName, this.rootPath, this.proxyName))
+                                            .recover(e -> {
+                                                if (e.getMessage() != null && (e.getMessage().contains("UNIQUE constraint") ||
+                                                        e.getMessage().contains("SQLITE_CONSTRAINT") ||
+                                                        e.getMessage().contains("duplicate key"))) {
+                                                    return DataVerticle.telegramRepository.getById(user.id)
+                                                            .compose(existing -> {
+                                                                if (existing != null) {
+                                                                    return cleanupOldVerticle(existing.rootPath())
+                                                                            .compose(_ -> DataVerticle.telegramRepository.update(
+                                                                                    new TelegramRecord(user.id, user.firstName, this.rootPath, this.proxyName)
+                                                                            ));
+                                                                }
+                                                                return Future.failedFuture(e);
+                                                            });
+                                                }
+                                                return Future.failedFuture(e);
+                                            })
                             )
                             .onSuccess(o -> {
                                 telegramRecord = o;
@@ -875,10 +919,14 @@ public class TelegramVerticle extends AbstractVerticle {
                 telegramChats.loadArchivedChatList();
                 break;
             case TdApi.AuthorizationStateLoggingOut.CONSTRUCTOR:
+                authorized = false;
+                sendEvent(EventPayload.build(EventPayload.TYPE_AUTHORIZATION, authorizationState));
                 break;
             case TdApi.AuthorizationStateClosing.CONSTRUCTOR:
+                authorized = false;
                 break;
             case TdApi.AuthorizationStateClosed.CONSTRUCTOR:
+                authorized = false;
                 if (needDelete) {
                     File root = FileUtil.file(this.rootPath);
                     if (root.exists()) {
