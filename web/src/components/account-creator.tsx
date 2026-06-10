@@ -92,6 +92,7 @@ export default function AccountCreator({
         case TelegramConstructor.WAIT_PHONE_NUMBER:
         case TelegramConstructor.WAIT_CODE:
         case TelegramConstructor.WAIT_PASSWORD:
+        case TelegramConstructor.WAIT_PREMIUM_PURCHASE:
           setAuthState(state.constructor);
           break;
         case TelegramConstructor.WAIT_OTHER_DEVICE_CONFIRMATION:
@@ -263,6 +264,23 @@ export default function AccountCreator({
           disabled={isMethodExecuting}
           required
         />
+        <p className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-400">
+          Using passkeys instead of a password? Close this dialog, start over,
+          and use the <strong>LOG IN BY QR CODE</strong> option to authenticate
+          from an existing Telegram device.
+        </p>
+      </div>
+    ),
+    [TelegramConstructor.WAIT_PREMIUM_PURCHASE]: (
+      <div className="space-y-2 rounded border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950">
+        <p className="font-medium text-red-700 dark:text-red-400">
+          Telegram Premium Required
+        </p>
+        <p className="text-xs text-red-600 dark:text-red-500">
+          This account requires an active Telegram Premium subscription to log
+          in. Please purchase Telegram Premium in the official Telegram app and
+          try again.
+        </p>
       </div>
     ),
   };
@@ -308,7 +326,8 @@ export default function AccountCreator({
       {authState && (
         <>
           {authStateFormFields[authState]}
-          {authState !== TelegramConstructor.WAIT_OTHER_DEVICE_CONFIRMATION && (
+          {authState !== TelegramConstructor.WAIT_OTHER_DEVICE_CONFIRMATION &&
+            authState !== TelegramConstructor.WAIT_PREMIUM_PURCHASE && (
             <Button
               type="submit"
               className={cn("w-full", isMethodExecuting ? "opacity-50" : "")}

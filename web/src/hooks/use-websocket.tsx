@@ -18,6 +18,7 @@ import { useToast } from "./use-toast";
 import { useDebounce } from "use-debounce";
 import { getWsUrl } from "@/lib/api";
 import { useSearchParams } from "next/navigation";
+import { useSWRConfig } from "swr";
 
 const WS_URL = `${getWsUrl()}`;
 
@@ -48,6 +49,7 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
     lastTimestamp: 0,
   });
   const { toast } = useToast();
+  const { mutate } = useSWRConfig();
   const [debounceSpeed] = useDebounce(accountDownloadSpeed.speed, 300, {
     leading: true,
     maxWait: 1000,
@@ -84,6 +86,9 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
         const payload: WebSocketMessage = lastJsonMessage;
         const timestamp = payload.timestamp;
         switch (payload.type) {
+          case WebSocketMessageType.AUTHORIZATION:
+            void mutate("/telegrams");
+            break;
           case WebSocketMessageType.ERROR:
             toast({
               variant: "error",

@@ -335,7 +335,11 @@ public class HttpVerticle extends AbstractVerticle {
     private void handleTelegramCreate(RoutingContext ctx) {
         String sessionId = ctx.session().id();
         TelegramVerticle telegramVerticle = sessionTelegramVerticles.get(sessionId);
-        if (telegramVerticle != null && !telegramVerticle.authorized) {
+        boolean isClosedOrClosing = telegramVerticle != null &&
+                telegramVerticle.lastAuthorizationState != null &&
+                (telegramVerticle.lastAuthorizationState.getConstructor() == TdApi.AuthorizationStateClosed.CONSTRUCTOR ||
+                        telegramVerticle.lastAuthorizationState.getConstructor() == TdApi.AuthorizationStateClosing.CONSTRUCTOR);
+        if (telegramVerticle != null && !telegramVerticle.authorized && !isClosedOrClosing) {
             ctx.json(new JsonObject()
                     .put("id", telegramVerticle.getId())
                     .put("lastState", telegramVerticle.lastAuthorizationState)
