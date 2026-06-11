@@ -189,7 +189,7 @@ public class TelegramVerticle extends AbstractVerticle {
             searchChatMessages.offset = Convert.toInt(filter.get("offset"), 0);
             searchChatMessages.limit = Convert.toInt(filter.get("limit"), 20);
             searchChatMessages.filter = TdApiHelp.getSearchMessagesFilter(filter.get("type"));
-            searchChatMessages.topicId = messageThreadId > 0 ? new TdApi.MessageTopicForum(messageThreadId) : null;
+            searchChatMessages.topicId = messageThreadId > 0 ? new TdApi.MessageTopicThread(messageThreadId) : null;
 
             return (Objects.equals(filter.get("downloadStatus"), FileRecord.DownloadStatus.idle.name()) ?
                     this.getIdleChatFiles(searchChatMessages, 0) :
