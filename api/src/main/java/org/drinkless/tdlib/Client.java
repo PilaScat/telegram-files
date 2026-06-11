@@ -1,16 +1,25 @@
+//
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2025
+//
+// Distributed under the Boost Software License, Version 1.0. (See accompanying
+// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+//
 package org.drinkless.tdlib;
 
-import dev.voroby.springframework.telegram.client.TelegramClient;
-import dev.voroby.springframework.telegram.exception.TelegramClientConfigurationException;
-
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Main class for interaction with the TDLib.
  */
 public final class Client {
+    static {
+        try {
+            System.loadLibrary("tdjni");
+        } catch (UnsatisfiedLinkError e) {
+            e.printStackTrace();
+        }
+    }
 
     /**
      * Interface for handler for results of queries to TDLib and incoming updates from TDLib.
@@ -126,24 +135,19 @@ public final class Client {
      * @param updateExceptionHandler  Handler for exceptions thrown from updateHandler. If it is null, exceptions will be ignored.
      * @param defaultExceptionHandler Default handler for exceptions thrown from all ResultHandler. If it is null, exceptions will be ignored.
      * @return created Client
-     * @throws TelegramClientConfigurationException if a Client instance has already been created for this JVM process.
-     *                                              If you want to create the instance again, you should close the running instance and get AuthorizationStateClosed.
-     *                                              After this, a new instance of the {@link TelegramClient} bean must be registered in context.
      */
-    public synchronized static Client create(ResultHandler updateHandler, ExceptionHandler updateExceptionHandler, ExceptionHandler defaultExceptionHandler) {
-        if (!clientStarted.get()) {
-            Client client = new Client(updateHandler, updateExceptionHandler, defaultExceptionHandler);
+    public static Client create(ResultHandler updateHandler, ExceptionHandler updateExceptionHandler, ExceptionHandler defaultExceptionHandler) {
+        Client client = new Client(updateHandler, updateExceptionHandler, defaultExceptionHandler);
+        synchronized (responseReceiver) {
             if (!responseReceiver.isRun) {
                 responseReceiver.isRun = true;
+
                 Thread receiverThread = new Thread(responseReceiver, "TDLib thread");
                 receiverThread.setDaemon(true);
                 receiverThread.start();
             }
-            clientStarted.set(true);
-
-            return client;
-        } else
-            throw new TelegramClientConfigurationException("Client instance is already running.");
+        }
+        return client;
     }
 
     /**
@@ -153,7 +157,7 @@ public final class Client {
      * @param maxVerbosityLevel The maximum verbosity level of messages for which the callback will be called.
      * @param logMessageHandler Handler for messages that are added to the internal TDLib log. Pass null to remove the handler.
      */
-    public static void setLogMessageHandler(int maxVerbosityLevel, LogMessageHandler logMessageHandler) {
+    public static void setLogMessageHandler(int maxVerbosityLevel, Client.LogMessageHandler logMessageHandler) {
         nativeClientSetLogMessageHandler(maxVerbosityLevel, logMessageHandler);
     }
 
@@ -202,7 +206,6 @@ public final class Client {
                 updateHandlers.remove(clientId);           // there will be no more updates
                 defaultExceptionHandlers.remove(clientId); // ignore further exceptions
                 clientCount.decrementAndGet();
-                clientStarted.set(false);
             }
         }
 
@@ -219,11 +222,18 @@ public final class Client {
     private static final ConcurrentHashMap<Long, Handler> handlers = new ConcurrentHashMap<Long, Handler>();
     private static final AtomicLong currentQueryId = new AtomicLong();
     private static final AtomicLong clientCount = new AtomicLong();
-    private static final AtomicBoolean clientStarted = new AtomicBoolean();
 
     private static final ResponseReceiver responseReceiver = new ResponseReceiver();
 
-    private record Handler(ResultHandler resultHandler, ExceptionHandler exceptionHandler) {}
+    private static class Handler {
+        final ResultHandler resultHandler;
+        final ExceptionHandler exceptionHandler;
+
+        Handler(ResultHandler resultHandler, ExceptionHandler exceptionHandler) {
+            this.resultHandler = resultHandler;
+            this.exceptionHandler = exceptionHandler;
+        }
+    }
 
     private Client(ResultHandler updateHandler, ExceptionHandler updateExceptionHandler, ExceptionHandler defaultExceptionHandler) {
         clientCount.incrementAndGet();
