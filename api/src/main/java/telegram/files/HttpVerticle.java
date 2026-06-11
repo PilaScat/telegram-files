@@ -34,6 +34,7 @@ import telegram.files.repository.SettingAutoRecords;
 import telegram.files.repository.SettingKey;
 import telegram.files.repository.SettingRecord;
 
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -89,10 +90,35 @@ public class HttpVerticle extends AbstractVerticle {
 
         return vertx.createHttpServer(options)
                 .requestHandler(initRouter())
+                .connectionHandler(connection -> connection.exceptionHandler(err -> {
+                    // The client closed the connection mid-transfer (e.g. it navigated away or
+                    // cancelled a thumbnail/video request while sendFile was still streaming).
+                    // These are benign transport errors; without a handler Vert.x reports them
+                    // as SEVERE with a full stack trace, spamming the logs.
+                    if (isConnectionResetError(err)) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Client connection closed: %s".formatted(err.getMessage()));
+                        }
+                    } else {
+                        log.error(err, "Connection error: %s".formatted(err.getMessage()));
+                    }
+                }))
                 .listen()
                 .onSuccess(_ -> log.info("API server started on port " + port))
                 .onFailure(err -> log.error("Failed to start API server: %s".formatted(err.getMessage())))
                 .mapEmpty();
+    }
+
+    private static boolean isConnectionResetError(Throwable err) {
+        if (!(err instanceof IOException) || err.getMessage() == null) {
+            return false;
+        }
+        String message = err.getMessage().toLowerCase();
+        return message.contains("broken pipe")
+               || message.contains("connection reset")
+               || message.contains("connection was aborted")
+               || message.contains("forcibly closed")
+               || message.contains("connection was forcibly closed");
     }
 
     public Router initRouter() {
