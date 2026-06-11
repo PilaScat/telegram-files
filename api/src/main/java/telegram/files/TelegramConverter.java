@@ -53,17 +53,32 @@ public class TelegramConverter {
     }
 
     public static Future<JsonArray> convertFiles(long telegramId, TdApi.Message[] messages) {
-        return DataVerticle.fileRepository.getFilesByUniqueId(TdApiHelp.getFileUniqueIds(Arrays.asList(messages)))
-                .compose(fileRecords ->
-                        FileRecordRetriever.getThumbnails(fileRecords.values())
-                                .map(thumbnails -> Tuple.tuple(fileRecords, thumbnails))
-                )
+        List<TdApi.Message> messageList = Arrays.asList(messages);
+        return DataVerticle.fileRepository.getFilesByUniqueId(TdApiHelp.getFileUniqueIds(messageList))
+                .compose(fileRecords -> {
+                    // Collect thumbnail uniqueIds from both the stored records and the live messages,
+                    // so previews can use the lightweight thumbnail even for files not tracked in the DB.
+                    Set<String> thumbnailUniqueIds = new HashSet<>();
+                    fileRecords.values().forEach(fileRecord -> {
+                        if (StrUtil.isNotBlank(fileRecord.thumbnailUniqueId())) {
+                            thumbnailUniqueIds.add(fileRecord.thumbnailUniqueId());
+                        }
+                    });
+                    messageList.forEach(message -> TdApiHelp.getFileHandler(message).ifPresent(handler -> {
+                        String thumbnailUniqueId = handler.getThumbnailFileUniqueId();
+                        if (StrUtil.isNotBlank(thumbnailUniqueId)) {
+                            thumbnailUniqueIds.add(thumbnailUniqueId);
+                        }
+                    }));
+                    return DataVerticle.fileRepository.getFilesByUniqueId(new ArrayList<>(thumbnailUniqueIds))
+                            .map(thumbnails -> Tuple.tuple(fileRecords, thumbnails));
+                })
                 .compose(t -> DataVerticle.settingRepository.<Boolean>getByKey(SettingKey.uniqueOnly).map(t::concat))
                 .map(t -> {
                     Map<String, FileRecord> fileRecords = t.v1;
                     Map<String, FileRecord> thumbnails = t.v2;
-                    List<TdApi.Message> filterMessages = t.v3 ? TdApiHelp.filterUniqueMessages(Arrays.asList(messages))
-                            : Arrays.asList(messages);
+                    List<TdApi.Message> filterMessages = t.v3 ? TdApiHelp.filterUniqueMessages(messageList)
+                            : messageList;
 
                     List<JsonObject> fileObjects = filterMessages.stream()
                             .filter(message -> TdApiHelp.FILE_CONTENT_CONSTRUCTORS.contains(message.content.getConstructor()))
@@ -71,9 +86,12 @@ public class TelegramConverter {
                                 //TODO Processing of the same file under different accounts
 
                                 FileRecord fileRecord = fileRecords.get(TdApiHelp.getFileUniqueId(message));
+                                String thumbnailUniqueId = fileRecord != null && StrUtil.isNotBlank(fileRecord.thumbnailUniqueId())
+                                        ? fileRecord.thumbnailUniqueId()
+                                        : TdApiHelp.getFileHandler(message).map(handler -> handler.getThumbnailFileUniqueId()).orElse(null);
                                 return withSource(telegramId,
                                         fileRecord,
-                                        fileRecord == null || StrUtil.isBlank(fileRecord.thumbnailUniqueId()) ? null : thumbnails.get(fileRecord.thumbnailUniqueId()),
+                                        StrUtil.isBlank(thumbnailUniqueId) ? null : thumbnails.get(thumbnailUniqueId),
                                         message);
                             })
                             .filter(Objects::nonNull)
