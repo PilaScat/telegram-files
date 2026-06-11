@@ -201,7 +201,10 @@ public class TelegramVerticle extends AbstractVerticle {
             return (Objects.equals(filter.get("downloadStatus"), FileRecord.DownloadStatus.idle.name()) ?
                     this.getIdleChatFiles(searchChatMessages, 0) :
                     client.execute(searchChatMessages))
-                    .compose(t -> TelegramConverter.convertFiles(this.telegramRecord.id(), t));
+                    .compose(t -> {
+                        preloadThumbnails(t);
+                        return TelegramConverter.convertFiles(this.telegramRecord.id(), t);
+                    });
         }
     }
 
@@ -370,6 +373,28 @@ public class TelegramVerticle extends AbstractVerticle {
                         log.debug("[%s] Download thumbnail: %s".formatted(this.getRootId(), thumbnailRecord.uniqueId()));
                     }
                 });
+    }
+
+    /**
+     * Eagerly downloads the lightweight thumbnails for the given messages so previews are crisp
+     * while browsing, without having to download the full media. Fire-and-forget: already
+     * downloaded thumbnails are skipped by {@link #downloadThumbnail}.
+     */
+    private void preloadThumbnails(TdApi.FoundChatMessages foundChatMessages) {
+        if (foundChatMessages == null || foundChatMessages.messages == null || telegramRecord == null) {
+            return;
+        }
+        for (TdApi.Message message : foundChatMessages.messages) {
+            TdApiHelp.getFileHandler(message).ifPresent(fileHandler -> {
+                FileRecord thumbnailRecord = fileHandler.convertThumbnailRecord(telegramRecord.id());
+                if (thumbnailRecord == null) {
+                    return;
+                }
+                downloadThumbnail(message.chatId, message.id, thumbnailRecord)
+                        .onFailure(err -> log.debug("[%s] Preload thumbnail failed for message %d: %s"
+                                .formatted(getRootId(), message.id, err.getMessage())));
+            });
+        }
     }
 
     public Future<Void> cancelDownload(Integer fileId) {
@@ -672,6 +697,9 @@ public class TelegramVerticle extends AbstractVerticle {
         if ("completed".equals(fileUpdated.getString("downloadStatus"))) {
             DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
                     .compose(mainFileRecord -> {
+                        if (mainFileRecord != null) {
+                            statusData.put("type", mainFileRecord.type());
+                        }
                         if (mainFileRecord != null && mainFileRecord.thumbnailUniqueId() != null) {
                             return FileRecordRetriever.getThumbnails(List.of(mainFileRecord))
                                     .map(thumbnailMap -> {

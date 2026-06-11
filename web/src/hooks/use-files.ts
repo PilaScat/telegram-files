@@ -10,7 +10,7 @@ import useSWRInfinite from "swr/infinite";
 import { useWebsocket } from "@/hooks/use-websocket";
 import { WebSocketMessageType } from "@/lib/websocket-types";
 import { useLocalStorage } from "@/hooks/use-local-storage";
-import { useDebounce } from "use-debounce";
+import { useDebounce, useDebouncedCallback } from "use-debounce";
 
 const DEFAULT_FILTERS: FileFilter = {
   search: "",
@@ -122,6 +122,12 @@ export function useFiles(
     maxWait: 1000,
   });
 
+  // A thumbnail finished downloading in the background; refetch so the list picks up the
+  // crisp thumbnailFile. Debounced to coalesce the bursts that happen while browsing.
+  const debouncedThumbnailRefetch = useDebouncedCallback(() => {
+    void mutate();
+  }, 1500);
+
   useEffect(() => {
     if (lastJsonMessage?.type !== WebSocketMessageType.FILE_STATUS) {
       return;
@@ -136,7 +142,13 @@ export function useFiles(
       transferStatus?: TransferStatus;
       thumbnailFile?: Thumbnail;
       removed?: boolean;
+      type?: string;
     };
+
+    if (data.type === "thumbnail") {
+      debouncedThumbnailRefetch();
+      return;
+    }
 
     if (data.removed) {
       setLatestFileStatus((prev) => ({
