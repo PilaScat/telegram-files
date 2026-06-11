@@ -23,9 +23,6 @@ jobs:
           - runner: ubuntu-latest
             platform: linux/amd64
             platform_tag: linux-amd64
-          - runner: ubuntu-latest
-            platform: linux/arm64
-            platform_tag: linux-arm64
     steps:
       - name: Set lowercase image name
         run: |
