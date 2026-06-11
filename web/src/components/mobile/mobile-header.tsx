@@ -94,7 +94,8 @@ export function MobileHeader() {
 function MenuDrawer() {
   const useTelegramAccountProps = useTelegramAccount();
   const { chat } = useTelegramChat();
-  const { connectionStatus } = useWebsocket();
+  const { connectionStatus, reconnect, telegramConnectionState } =
+    useWebsocket();
   const [layout, setLayout] = useLocalStorage<"detailed" | "gallery">(
     "telegramFileLayout",
     "detailed",
@@ -176,18 +177,34 @@ function MenuDrawer() {
                 </div>
               </div>
               <div className="flex items-center justify-between gap-2 py-4">
-                <Badge
-                  variant={
-                    connectionStatus === "Open" ? "default" : "secondary"
-                  }
-                >
-                  {connectionStatus === "Open" ? (
-                    <ChevronsLeftRightEllipsisIcon className="mr-1 h-4 w-4" />
-                  ) : (
-                    <UnplugIcon className="mr-1 h-4 w-4" />
-                  )}
-                  {connectionStatus}
-                </Badge>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge
+                    variant={
+                      connectionStatus === "Open" ? "default" : "secondary"
+                    }
+                    className={
+                      connectionStatus !== "Open" ? "cursor-pointer" : undefined
+                    }
+                    onClick={
+                      connectionStatus !== "Open" ? reconnect : undefined
+                    }
+                  >
+                    {connectionStatus === "Open" ? (
+                      <ChevronsLeftRightEllipsisIcon className="mr-1 h-4 w-4" />
+                    ) : (
+                      <UnplugIcon className="mr-1 h-4 w-4" />
+                    )}
+                    {connectionStatus}
+                  </Badge>
+
+                  {telegramConnectionState &&
+                    telegramConnectionState !== "ready" && (
+                      <Badge variant="secondary">
+                        <UnplugIcon className="mr-1 h-4 w-4" />
+                        Telegram: {telegramConnectionState}
+                      </Badge>
+                    )}
+                </div>
 
                 <ThemeToggleButton />
                 <SettingsDialog />

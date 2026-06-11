@@ -59,6 +59,8 @@ public class TelegramVerticle extends AbstractVerticle {
 
     private long downloadStatusReconciliationTimerId;
 
+    public TdApi.ConnectionState lastConnectionState;
+
     private long lastFileEventTime;
 
     private long lastFileDownloadEventTime;
@@ -98,6 +100,7 @@ public class TelegramVerticle extends AbstractVerticle {
         telegramUpdateHandler.setOnFileDownloadsUpdated(this::onFileDownloadsUpdated);
         telegramUpdateHandler.setOnChatUpdated(telegramChats::onChatUpdated);
         telegramUpdateHandler.setOnMessageReceived(this::onMessageReceived);
+        telegramUpdateHandler.setOnConnectionStateUpdated(this::onConnectionStateUpdated);
 
         client.initialize(telegramUpdateHandler, this::handleException, this::handleException);
         Future.all(initEventConsumer(), initAvgSpeed())
@@ -824,6 +827,28 @@ public class TelegramVerticle extends AbstractVerticle {
                     }
                 })
                 .onFailure(e -> log.error("[%s] Failed to get downloading files for reconciliation: %s".formatted(getRootId(), e.getMessage())));
+    }
+
+    private void onConnectionStateUpdated(TdApi.ConnectionState connectionState) {
+        this.lastConnectionState = connectionState;
+        log.debug("[%s] Connection state: %s".formatted(getRootId(), connectionState.getClass().getSimpleName()));
+        if (connectionState.getConstructor() == TdApi.ConnectionStateWaitingForNetwork.CONSTRUCTOR) {
+            // Tell TDLib the network is available so it retries connecting instead of waiting indefinitely.
+            client.execute(new TdApi.SetNetworkType(new TdApi.NetworkTypeOther()), true);
+        }
+        sendEvent(EventPayload.build(EventPayload.TYPE_CONNECTION, new JsonObject()
+                .put("state", connectionStateName(connectionState))));
+    }
+
+    private static String connectionStateName(TdApi.ConnectionState state) {
+        return switch (state.getConstructor()) {
+            case TdApi.ConnectionStateReady.CONSTRUCTOR -> "ready";
+            case TdApi.ConnectionStateConnecting.CONSTRUCTOR -> "connecting";
+            case TdApi.ConnectionStateConnectingToProxy.CONSTRUCTOR -> "connectingToProxy";
+            case TdApi.ConnectionStateUpdating.CONSTRUCTOR -> "updating";
+            case TdApi.ConnectionStateWaitingForNetwork.CONSTRUCTOR -> "waitingForNetwork";
+            default -> "unknown";
+        };
     }
 
     private void onAuthorizationStateUpdated(TdApi.AuthorizationState authorizationState) {
