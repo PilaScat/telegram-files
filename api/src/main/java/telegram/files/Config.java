@@ -13,6 +13,7 @@ import io.vertx.core.ThreadingModel;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.channels.ClosedChannelException;
 import java.util.Objects;
 import java.util.logging.*;
 
@@ -98,9 +99,12 @@ public class Config {
             }
         }
 
+        IgnoreExceptionLogFilter connectionErrorFilter = new IgnoreExceptionLogFilter();
+
         ConsoleHandler consoleHandler = new ConsoleHandler();
         consoleHandler.setLevel(Level.FINEST);
         consoleHandler.setFormatter(new SimpleFormatter());
+        consoleHandler.setFilter(connectionErrorFilter);
         rootLogger.addHandler(consoleHandler);
 
         try {
@@ -109,6 +113,7 @@ public class Config {
             FileHandler fileHandler = new FileHandler(logFilePattern, 5000000, 3, true);
             fileHandler.setLevel(Level.FINEST);
             fileHandler.setFormatter(new SimpleFormatter());
+            fileHandler.setFilter(connectionErrorFilter);
             rootLogger.addHandler(fileHandler);
         } catch (IOException e) {
             System.out.println("Failed to create log FileHandler: " + e.getMessage());
@@ -137,6 +142,29 @@ public class Config {
 
     public static boolean isMysql() {
         return Objects.equals(DB_TYPE, "mysql");
+    }
+
+    /**
+     * Drops benign client-disconnect exceptions (broken pipe / connection reset / closed channel)
+     * that Vert.x logs at SEVERE when a client aborts an in-flight file download (e.g. seeking a
+     * video or closing the tab). These are normal and would otherwise flood the logs with stack traces.
+     */
+    public static class IgnoreExceptionLogFilter implements Filter {
+        @Override
+        public boolean isLoggable(LogRecord record) {
+            Throwable t = record.getThrown();
+            if (t instanceof ClosedChannelException) {
+                return false;
+            }
+            if (t instanceof IOException && t.getMessage() != null) {
+                String message = t.getMessage().toLowerCase();
+                return !(message.contains("broken pipe")
+                         || message.contains("connection reset")
+                         || message.contains("connection was aborted")
+                         || message.contains("forcibly closed"));
+            }
+            return true;
+        }
     }
 
     public static class JDKLogFactory extends LogFactory {
