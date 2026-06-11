@@ -453,6 +453,24 @@ function TransferRule({ value, onChange }: TransferRuleProps) {
                 location.
               </p>
             </div>
+
+            <div className="rounded-md border p-4">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="use-caption-name">Add caption to file name</Label>
+                <Switch
+                  id="use-caption-name"
+                  checked={value.useCaptionName ?? false}
+                  onCheckedChange={(checked) =>
+                    handleTransferRuleChange({ useCaptionName: checked })
+                  }
+                />
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Append the post caption to the transferred file name (e.g.
+                name_caption.jpg). Falls back to the original name when the post
+                has no caption.
+              </p>
+            </div>
           </div>
         </AccordionContent>
       </AccordionItem>

@@ -35,17 +35,22 @@ public abstract class Transfer {
 
     public boolean transferHistory;
 
+    public boolean useCaptionName;
+
     public JsonObject extra;
 
     public Consumer<TransferStatusUpdated> transferStatusUpdated;
 
     private FileRecord transferRecord;
 
+    private static final int MAX_CAPTION_NAME_LENGTH = 80;
+
     public Transfer(SettingAutoRecords.TransferRule transferRule) {
         this.destination = transferRule.destination;
         this.transferPolicy = transferRule.transferPolicy;
         this.duplicationPolicy = transferRule.duplicationPolicy;
         this.transferHistory = transferRule.transferHistory;
+        this.useCaptionName = transferRule.useCaptionName;
         this.extra = transferRule.extra != null ? transferRule.extra : new JsonObject();
     }
 
@@ -63,6 +68,7 @@ public abstract class Transfer {
                || this.transferPolicy != transferRule.transferPolicy
                || this.duplicationPolicy != transferRule.duplicationPolicy
                || this.transferHistory != transferRule.transferHistory
+               || this.useCaptionName != transferRule.useCaptionName
                || !Objects.equals(this.extra, transferRule.extra);
     }
 
@@ -137,6 +143,41 @@ public abstract class Transfer {
         return Path.of(parent, "%s-%d.%s".formatted(baseName, i, extension)).toString();
     }
 
+    /**
+     * Builds the destination file name. When {@link #useCaptionName} is enabled and the file has a
+     * caption, the caption is appended before the extension: {@code <originalBaseName>_<caption>.<ext>}.
+     * Falls back to the original file name when disabled or when there is no usable caption.
+     */
+    protected String buildFileName(FileRecord fileRecord) {
+        String originalName = FileUtil.getName(fileRecord.localPath());
+        if (!useCaptionName || StrUtil.isBlank(fileRecord.caption())) {
+            return originalName;
+        }
+        String caption = sanitizeForFileName(fileRecord.caption());
+        if (StrUtil.isBlank(caption)) {
+            return originalName;
+        }
+        String extension = FileUtil.extName(originalName);
+        String baseName = FileUtil.mainName(originalName);
+        return StrUtil.isBlank(extension)
+                ? "%s_%s".formatted(baseName, caption)
+                : "%s_%s.%s".formatted(baseName, caption, extension);
+    }
+
+    private static String sanitizeForFileName(String text) {
+        if (text == null) {
+            return "";
+        }
+        // Replace characters that are illegal/problematic in file names and collapse whitespace.
+        String sanitized = text.replaceAll("[\\\\/:*?\"<>|\\r\\n\\t]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (sanitized.length() > MAX_CAPTION_NAME_LENGTH) {
+            sanitized = sanitized.substring(0, MAX_CAPTION_NAME_LENGTH).trim();
+        }
+        return sanitized;
+    }
+
     public FileRecord getTransferRecord() {
         return transferRecord;
     }
@@ -151,7 +192,7 @@ public abstract class Transfer {
 
         @Override
         protected String getTransferPath(FileRecord fileRecord) {
-            String name = FileUtil.getName(fileRecord.localPath());
+            String name = buildFileName(fileRecord);
             return Path.of(destination,
                     Convert.toStr(fileRecord.telegramId()),
                     Convert.toStr(fileRecord.chatId()),
@@ -168,7 +209,7 @@ public abstract class Transfer {
 
         @Override
         protected String getTransferPath(FileRecord fileRecord) {
-            String name = FileUtil.getName(fileRecord.localPath());
+            String name = buildFileName(fileRecord);
             return Path.of(destination,
                     fileRecord.type(),
                     name
@@ -208,7 +249,7 @@ public abstract class Transfer {
                 throw new IllegalStateException("Invalid classification result from AI: " + result);
             }
             log.debug("File {} classified to {} by AI, reason: {}", fileRecord.id(), result.path, result.reason);
-            String name = FileUtil.getName(fileRecord.localPath());
+            String name = buildFileName(fileRecord);
             // Check if the path contains file extension
             if (StrUtil.isNotBlank(FileUtil.extName(result.path))) {
                 name = "";
@@ -230,7 +271,7 @@ public abstract class Transfer {
 
         @Override
         protected String getTransferPath(FileRecord fileRecord) {
-            String name = FileUtil.getName(fileRecord.localPath());
+            String name = buildFileName(fileRecord);
             return Path.of(destination, name).toString();
         }
     }

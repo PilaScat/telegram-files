@@ -43,6 +43,7 @@ const DEFAULT_AUTO: Auto = {
       destination: "",
       transferPolicy: "GROUP_BY_CHAT",
       duplicationPolicy: "OVERWRITE",
+      useCaptionName: false,
       extra: {},
     },
   },
