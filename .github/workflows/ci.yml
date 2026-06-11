@@ -39,16 +39,16 @@ jobs:
           path: |
             ../libs
             ../.env.test
-          key: ${{ runner.os }}-tdlib-1.15.0
+          key: ${{ runner.os }}-tdlib-1.18.0
 
       - name: Download tdlib and create .env.test file
         if: steps.cache-tdlib.outputs.cache-hit != 'true'
         run: |
           cd ../ && \
-          wget --no-check-certificate -q -O libs.zip https://github.com/p-vorobyev/spring-boot-starter-telegram/releases/download/1.15.0/libs.zip && \
+          wget --no-check-certificate -q -O libs.zip https://github.com/p-vorobyev/spring-boot-starter-telegram/releases/download/1.18.0/libs.zip && \
           unzip -q libs.zip && \
           cat <<EOF > .env.test
-          TDLIB_PATH=../libs/linux_x64
+          TDLIB_PATH=../libs/centos_stream9_x64
           APP_ENV=prod
           APP_ROOT=${{ github.workspace }}/data
           TELEGRAM_API_ID=94575
