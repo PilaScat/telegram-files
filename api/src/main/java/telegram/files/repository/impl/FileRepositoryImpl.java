@@ -244,6 +244,22 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     }
 
     @Override
+    public Future<List<FileRecord>> getByDownloadStatus(long telegramId, FileRecord.DownloadStatus downloadStatus) {
+        return SqlTemplate
+                .forQuery(sqlClient, """
+                        SELECT * FROM file_record WHERE telegram_id = #{telegramId} AND download_status = #{downloadStatus}
+                        """)
+                .mapTo(FileRecord.ROW_MAPPER)
+                .execute(Map.of("telegramId", telegramId, "downloadStatus", downloadStatus.name()))
+                .onFailure(err -> log.error("Failed to get files by download status: %s".formatted(err.getMessage())))
+                .map(rs -> {
+                    List<FileRecord> records = new ArrayList<>();
+                    rs.forEach(records::add);
+                    return records;
+                });
+    }
+
+    @Override
     public Future<FileRecord> getByPrimaryKey(int fileId, String uniqueId) {
         return SqlTemplate
                 .forQuery(sqlClient, """

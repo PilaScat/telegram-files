@@ -28,6 +28,8 @@ interface WebsocketContextType {
   connectionStatus: string;
   isReady: boolean;
   accountDownloadSpeed: number;
+  reconnect: () => void;
+  telegramConnectionState: string | null;
 }
 
 const WebSocketContext = createContext<WebsocketContextType | undefined>(
@@ -55,15 +57,47 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
     maxWait: 1000,
   });
 
+  const [reconnectNonce, setReconnectNonce] = useState(0);
+  const [telegramConnectionState, setTelegramConnectionState] = useState<
+    string | null
+  >(null);
+
   const { sendMessage, lastJsonMessage, readyState } =
     useWebSocket<WebSocketMessage>(
-      `${WS_URL}?telegramId=${searchParams.get("id") ?? ""}`,
+      `${WS_URL}?telegramId=${searchParams.get("id") ?? ""}&_r=${reconnectNonce}`,
       {
-        shouldReconnect: (closeEvent) => true,
-        reconnectAttempts: 3,
-        reconnectInterval: 3000,
+        // Keep retrying (essentially) forever with exponential backoff capped at 30s, and also
+        // retry on error events — so a transient outage recovers on its own instead of giving up.
+        shouldReconnect: () => true,
+        reconnectAttempts: 999,
+        reconnectInterval: (attemptNumber) =>
+          Math.min(1000 * 2 ** attemptNumber, 30000),
+        retryOnError: true,
       },
     );
+
+  // Force a fresh connection (resets the backoff/attempt counter); used by the manual
+  // "reconnect" affordance and when the network/focus comes back.
+  const reconnect = useCallback(() => {
+    setReconnectNonce((n) => n + 1);
+  }, []);
+
+  useEffect(() => {
+    const maybeReconnect = () => {
+      if (
+        readyState !== ReadyState.OPEN &&
+        readyState !== ReadyState.CONNECTING
+      ) {
+        setReconnectNonce((n) => n + 1);
+      }
+    };
+    window.addEventListener("online", maybeReconnect);
+    window.addEventListener("focus", maybeReconnect);
+    return () => {
+      window.removeEventListener("online", maybeReconnect);
+      window.removeEventListener("focus", maybeReconnect);
+    };
+  }, [readyState]);
 
   const connectionStatus = {
     [ReadyState.CONNECTING]: "Connecting",
@@ -88,6 +122,11 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
         switch (payload.type) {
           case WebSocketMessageType.AUTHORIZATION:
             void mutate("/telegrams");
+            break;
+          case WebSocketMessageType.CONNECTION:
+            setTelegramConnectionState(
+              (payload.data as { state?: string })?.state ?? null,
+            );
             break;
           case WebSocketMessageType.ERROR:
             toast({
@@ -158,6 +197,8 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
         connectionStatus,
         isReady,
         accountDownloadSpeed: debounceSpeed,
+        reconnect,
+        telegramConnectionState,
       }}
     >
       {children}

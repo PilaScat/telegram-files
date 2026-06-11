@@ -300,7 +300,18 @@ public class HttpVerticle extends AbstractVerticle {
                         }
                     });
 
-                    ws.exceptionHandler(throwable -> log.error("WebSocket error: %s".formatted(throwable.getMessage())));
+                    ws.exceptionHandler(throwable -> {
+                        String message = throwable.getMessage();
+                        if (message != null && (message.contains("Connection was closed")
+                                                || message.contains("Connection reset")
+                                                || message.contains("Broken pipe"))) {
+                            // Benign: the browser dropped the live-update channel (sleep, network change, ...).
+                            // It reconnects on its own; don't report it as a SEVERE error.
+                            log.debug("WebSocket connection closed: %s".formatted(message));
+                        } else {
+                            log.error("WebSocket error: %s".formatted(message));
+                        }
+                    });
                     ws.closeHandler(_ -> {
                         clients.remove(sessionId);
                         sessionTelegramVerticles.remove(sessionId);

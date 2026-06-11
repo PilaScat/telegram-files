@@ -12,6 +12,7 @@ export const WebSocketMessageType = {
   FILE_UPDATE: 3,
   FILE_DOWNLOAD: 4,
   FILE_STATUS: 5,
+  CONNECTION: 6,
 };
 
 export type TelegramError = {

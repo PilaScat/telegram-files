@@ -57,6 +57,10 @@ public class TelegramVerticle extends AbstractVerticle {
 
     private long avgSpeedPersistenceTimerId;
 
+    private long downloadStatusReconciliationTimerId;
+
+    public TdApi.ConnectionState lastConnectionState;
+
     private long lastFileEventTime;
 
     private long lastFileDownloadEventTime;
@@ -96,10 +100,12 @@ public class TelegramVerticle extends AbstractVerticle {
         telegramUpdateHandler.setOnFileDownloadsUpdated(this::onFileDownloadsUpdated);
         telegramUpdateHandler.setOnChatUpdated(telegramChats::onChatUpdated);
         telegramUpdateHandler.setOnMessageReceived(this::onMessageReceived);
+        telegramUpdateHandler.setOnConnectionStateUpdated(this::onConnectionStateUpdated);
 
         client.initialize(telegramUpdateHandler, this::handleException, this::handleException);
         Future.all(initEventConsumer(), initAvgSpeed())
                 .compose(_ -> this.enableProxy(this.proxyName))
+                .compose(_ -> this.initDownloadStatusReconciliation())
                 .onSuccess(_ -> startPromise.complete())
                 .onFailure(startPromise::fail);
     }
@@ -111,6 +117,10 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<Void> close(boolean needDelete) {
+        if (downloadStatusReconciliationTimerId != 0) {
+            vertx.cancelTimer(downloadStatusReconciliationTimerId);
+            downloadStatusReconciliationTimerId = 0;
+        }
         return client.execute(new TdApi.Close())
                 .onSuccess(_ -> {
                     log.info("[%s] Telegram account closed".formatted(this.getRootId()));
@@ -387,6 +397,80 @@ public class TelegramVerticle extends AbstractVerticle {
                         .onFailure(err -> log.debug("[%s] Preload thumbnail failed for message %d: %s"
                                 .formatted(getRootId(), message.id, err.getMessage())));
             });
+        }
+    }
+
+    private void onConnectionStateUpdated(TdApi.ConnectionState connectionState) {
+        this.lastConnectionState = connectionState;
+        log.debug("[%s] Connection state: %s".formatted(getRootId(), connectionState.getClass().getSimpleName()));
+        if (connectionState.getConstructor() == TdApi.ConnectionStateWaitingForNetwork.CONSTRUCTOR) {
+            // Tell TDLib the network is available so it retries connecting instead of waiting indefinitely.
+            client.execute(new TdApi.SetNetworkType(new TdApi.NetworkTypeOther()), true);
+        }
+        sendEvent(EventPayload.build(EventPayload.TYPE_CONNECTION, new JsonObject()
+                .put("state", connectionStateName(connectionState))));
+    }
+
+    private static String connectionStateName(TdApi.ConnectionState state) {
+        return switch (state.getConstructor()) {
+            case TdApi.ConnectionStateReady.CONSTRUCTOR -> "ready";
+            case TdApi.ConnectionStateConnecting.CONSTRUCTOR -> "connecting";
+            case TdApi.ConnectionStateConnectingToProxy.CONSTRUCTOR -> "connectingToProxy";
+            case TdApi.ConnectionStateUpdating.CONSTRUCTOR -> "updating";
+            case TdApi.ConnectionStateWaitingForNetwork.CONSTRUCTOR -> "waitingForNetwork";
+            default -> "unknown";
+        };
+    }
+
+    private Future<Void> initDownloadStatusReconciliation() {
+        if (downloadStatusReconciliationTimerId == 0) {
+            downloadStatusReconciliationTimerId = vertx.setPeriodic(60000, _ -> reconcileDownloadStatuses());
+            log.debug("[%s] Download status reconciliation timer initialized".formatted(getRootId()));
+        }
+        return Future.succeededFuture();
+    }
+
+    /**
+     * Periodically reconciles files stuck in 'downloading' state with TDLib's actual state:
+     * downloads that finished are marked completed (freeing auto-download slots), and downloads
+     * that stalled (e.g. after a network drop) are re-queued so they resume without a manual restart.
+     */
+    private void reconcileDownloadStatuses() {
+        if (!authorized || telegramRecord == null) {
+            return;
+        }
+        DataVerticle.fileRepository.getByDownloadStatus(telegramRecord.id(), FileRecord.DownloadStatus.downloading)
+                .onSuccess(fileRecords -> {
+                    if (fileRecords == null || fileRecords.isEmpty()) {
+                        return;
+                    }
+                    log.debug("[%s] Reconciling %d files in 'downloading' state".formatted(getRootId(), fileRecords.size()));
+                    fileRecords.forEach(fileRecord -> client.execute(new TdApi.GetFile(fileRecord.id()))
+                            .onSuccess(file -> reconcileFile(fileRecord, file))
+                            .onFailure(e -> log.trace("[%s] Reconciliation GetFile failed for %s: %s"
+                                    .formatted(getRootId(), fileRecord.uniqueId(), e.getMessage()))));
+                })
+                .onFailure(e -> log.error("[%s] Reconciliation query failed: %s".formatted(getRootId(), e.getMessage())));
+    }
+
+    private void reconcileFile(FileRecord fileRecord, TdApi.File file) {
+        if (file.local == null) {
+            return;
+        }
+        if (file.local.isDownloadingCompleted) {
+            // Completed in TDLib but DB still shows 'downloading' — fix it (frees a download slot).
+            DataVerticle.fileRepository.updateDownloadStatus(file.id, file.remote.uniqueId, file.local.path,
+                            FileRecord.DownloadStatus.completed, System.currentTimeMillis())
+                    .onSuccess(r -> {
+                        sendFileStatusHttpEvent(file, r);
+                        log.info("[%s] Reconciliation: marked stuck download as completed: %s"
+                                .formatted(getRootId(), file.remote.uniqueId));
+                    });
+        } else if (!file.local.isDownloadingActive && file.local.canBeDownloaded) {
+            // Stalled: DB says 'downloading' but TDLib isn't actively downloading it. Re-queue to resume.
+            client.execute(new TdApi.AddFileToDownloads(file.id, fileRecord.chatId(), fileRecord.messageId(), 32), true)
+                    .onSuccess(_ -> log.info("[%s] Reconciliation: resumed stalled download: %s"
+                            .formatted(getRootId(), file.remote.uniqueId)));
         }
     }
 

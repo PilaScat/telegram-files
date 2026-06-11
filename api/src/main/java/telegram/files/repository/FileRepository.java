@@ -17,6 +17,8 @@ public interface FileRepository {
 
     Future<Map<String, FileRecord>> getFilesByUniqueId(List<String> uniqueIds);
 
+    Future<List<FileRecord>> getByDownloadStatus(long telegramId, FileRecord.DownloadStatus downloadStatus);
+
     Future<FileRecord> getByPrimaryKey(int fileId, String uniqueId);
 
     Future<FileRecord> getByUniqueId(String uniqueId);
