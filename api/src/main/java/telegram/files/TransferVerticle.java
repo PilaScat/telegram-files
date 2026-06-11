@@ -93,6 +93,10 @@ public class TransferVerticle extends AbstractVerticle {
                     return;
                 }
                 FileRecord fileRecord = Future.await(DataVerticle.fileRepository.getByUniqueId((String) data.get("uniqueId")));
+                if (fileRecord == null || "thumbnail".equals(fileRecord.type())) {
+                    // Thumbnails are internal preview files; never transfer them.
+                    return;
+                }
 
                 SettingAutoRecords.Automation automation = null;
                 if (fileRecord.threadChatId() != 0 && fileRecord.messageThreadId() != 0 && fileRecord.threadChatId() == fileRecord.chatId()) {
@@ -150,6 +154,10 @@ public class TransferVerticle extends AbstractVerticle {
 
             int count = 0;
             for (FileRecord fileRecord : files) {
+                if ("thumbnail".equals(fileRecord.type())) {
+                    // Thumbnails are internal preview files; never transfer them.
+                    continue;
+                }
                 if (addWaitingTransferFile(fileRecord)) {
                     count++;
                 }
