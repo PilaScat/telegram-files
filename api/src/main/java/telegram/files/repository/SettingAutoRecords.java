@@ -118,6 +118,9 @@ public class SettingAutoRecords {
 
         public Transfer.DuplicationPolicy duplicationPolicy;
 
+        // When true, the post caption is appended to the destination file name.
+        public boolean useCaptionName;
+
         public JsonObject extra;
     }
 
