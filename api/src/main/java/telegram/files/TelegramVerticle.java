@@ -506,6 +506,13 @@ public class TelegramVerticle extends AbstractVerticle {
             return;
         }
         if (file.local.isDownloadingCompleted) {
+            if (StrUtil.isBlank(file.local.path) || !FileUtil.exist(file.local.path)) {
+                // TDLib reports the download as completed but the file isn't on disk (inconsistent
+                // state after a stall). Don't mark it completed — that would fire a transfer for a
+                // missing file. Park it as error so it frees the slot and can be cleanly re-downloaded.
+                markReconcileError(file);
+                return;
+            }
             // Completed in TDLib but DB still shows 'downloading' — fix it (frees a download slot).
             reconcileStates.remove(file.id);
             DataVerticle.fileRepository.updateDownloadStatus(file.id, file.remote.uniqueId, file.local.path,
