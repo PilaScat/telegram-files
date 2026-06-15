@@ -61,6 +61,17 @@ public class TelegramVerticle extends AbstractVerticle {
 
     private long downloadStatusReconciliationTimerId;
 
+    // Per-file reconciliation state: tracks download progress so we only act on genuinely stalled
+    // downloads, and give up (mark error) after repeated failures instead of looping forever.
+    private final Map<Integer, ReconcileState> reconcileStates = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final int MAX_STALL_ATTEMPTS = 5;
+
+    private static final class ReconcileState {
+        long lastDownloadedSize = -1;
+        int stallAttempts = 0;
+    }
+
     private volatile TdApi.ConnectionState lastConnectionState;
 
     private long lastFileEventTime;
@@ -123,6 +134,7 @@ public class TelegramVerticle extends AbstractVerticle {
             vertx.cancelTimer(downloadStatusReconciliationTimerId);
             downloadStatusReconciliationTimerId = 0;
         }
+        reconcileStates.clear();
         return client.execute(new TdApi.Close())
                 .onSuccess(_ -> {
                     log.info("[%s] Telegram account closed".formatted(this.getRootId()));
@@ -471,8 +483,13 @@ public class TelegramVerticle extends AbstractVerticle {
         DataVerticle.fileRepository.getByDownloadStatus(telegramRecord.id(), FileRecord.DownloadStatus.downloading)
                 .onSuccess(fileRecords -> {
                     if (fileRecords == null || fileRecords.isEmpty()) {
+                        reconcileStates.clear();
                         return;
                     }
+                    // Drop tracking state for files no longer in the 'downloading' set.
+                    java.util.Set<Integer> stillDownloading = fileRecords.stream()
+                            .map(FileRecord::id).collect(java.util.stream.Collectors.toSet());
+                    reconcileStates.keySet().retainAll(stillDownloading);
                     log.debug("[%s] Reconciling %d files in 'downloading' state".formatted(getRootId(), fileRecords.size()));
                     fileRecords.forEach(fileRecord -> client.execute(new TdApi.GetFile(fileRecord.id()))
                             .onSuccess(file -> reconcileFile(fileRecord, file))
@@ -488,6 +505,7 @@ public class TelegramVerticle extends AbstractVerticle {
         }
         if (file.local.isDownloadingCompleted) {
             // Completed in TDLib but DB still shows 'downloading' — fix it (frees a download slot).
+            reconcileStates.remove(file.id);
             DataVerticle.fileRepository.updateDownloadStatus(file.id, file.remote.uniqueId, file.local.path,
                             FileRecord.DownloadStatus.completed, System.currentTimeMillis())
                     .onSuccess(r -> {
@@ -495,12 +513,57 @@ public class TelegramVerticle extends AbstractVerticle {
                         log.info("[%s] Reconciliation: marked stuck download as completed: %s"
                                 .formatted(getRootId(), file.remote.uniqueId));
                     });
-        } else if (!file.local.isDownloadingActive && file.local.canBeDownloaded) {
-            // Stalled: DB says 'downloading' but TDLib isn't actively downloading it. Re-queue to resume.
-            client.execute(new TdApi.AddFileToDownloads(file.id, fileRecord.chatId(), fileRecord.messageId(), 32), true)
-                    .onSuccess(_ -> log.info("[%s] Reconciliation: resumed stalled download: %s"
-                            .formatted(getRootId(), file.remote.uniqueId)));
+            return;
         }
+
+        ReconcileState state = reconcileStates.computeIfAbsent(file.id, _ -> new ReconcileState());
+
+        if (file.local.isDownloadingActive) {
+            // TDLib is actively working on it. As long as the byte count keeps moving, leave it alone.
+            if (file.local.downloadedSize > state.lastDownloadedSize) {
+                state.lastDownloadedSize = file.local.downloadedSize;
+                state.stallAttempts = 0;
+                return;
+            }
+            // Active but frozen (no bytes since last pass) — let it ride a little before intervening.
+            if (++state.stallAttempts < MAX_STALL_ATTEMPTS) {
+                return;
+            }
+        }
+
+        if (!file.local.canBeDownloaded) {
+            // Download is dead (file no longer available / reference unrecoverable). Mark error so it
+            // stops occupying a slot and becomes visible + retriable.
+            markReconcileError(file);
+            return;
+        }
+
+        // Genuinely stalled. Give up after repeated attempts so it frees a slot instead of looping forever.
+        if (state.stallAttempts >= MAX_STALL_ATTEMPTS) {
+            markReconcileError(file);
+            return;
+        }
+        state.stallAttempts++;
+        // Re-fetch the message first: this renews an expired file reference (the common cause of a
+        // download stuck at 0 bytes). A bare AddFileToDownloads on an already-listed file is a no-op.
+        client.execute(new TdApi.GetMessage(fileRecord.chatId(), fileRecord.messageId()), true)
+                .compose(_ -> client.execute(new TdApi.AddFileToDownloads(file.id, fileRecord.chatId(), fileRecord.messageId(), 32), true))
+                .onSuccess(_ -> log.info("[%s] Reconciliation: resumed stalled download (attempt %d/%d): %s"
+                        .formatted(getRootId(), state.stallAttempts, MAX_STALL_ATTEMPTS, file.remote.uniqueId)))
+                .onFailure(e -> log.debug("[%s] Reconciliation: resume failed for %s: %s"
+                        .formatted(getRootId(), file.remote.uniqueId, e.getMessage())));
+    }
+
+    private void markReconcileError(TdApi.File file) {
+        reconcileStates.remove(file.id);
+        DataVerticle.fileRepository.updateDownloadStatus(file.id, file.remote.uniqueId,
+                        file.local != null ? file.local.path : null,
+                        FileRecord.DownloadStatus.error, null)
+                .onSuccess(r -> {
+                    sendFileStatusHttpEvent(file, r);
+                    log.warn("[%s] Reconciliation: gave up on stuck download, marked error: %s"
+                            .formatted(getRootId(), file.remote.uniqueId));
+                });
     }
 
     public Future<Void> cancelDownload(Integer fileId) {
