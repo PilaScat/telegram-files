@@ -339,7 +339,9 @@ public class TelegramVerticle extends AbstractVerticle {
                         }
 //                        return Future.failedFuture("Unknown file download status");
                     }
-                    if (dbFileRecord != null && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                    if (dbFileRecord != null
+                        && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)
+                        && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.error)) {
                         return Future.failedFuture("File is already downloading or completed");
                     }
 
@@ -509,9 +511,11 @@ public class TelegramVerticle extends AbstractVerticle {
             DataVerticle.fileRepository.updateDownloadStatus(file.id, file.remote.uniqueId, file.local.path,
                             FileRecord.DownloadStatus.completed, System.currentTimeMillis())
                     .onSuccess(r -> {
-                        sendFileStatusHttpEvent(file, r);
-                        log.info("[%s] Reconciliation: marked stuck download as completed: %s"
-                                .formatted(getRootId(), file.remote.uniqueId));
+                        if (r != null) { // only when the status actually changed (avoids per-minute log spam)
+                            sendFileStatusHttpEvent(file, r);
+                            log.info("[%s] Reconciliation: marked stuck download as completed: %s"
+                                    .formatted(getRootId(), file.remote.uniqueId));
+                        }
                     });
             return;
         }
@@ -532,7 +536,7 @@ public class TelegramVerticle extends AbstractVerticle {
         }
 
         if (!file.local.canBeDownloaded) {
-            // Download is dead (file no longer available / reference unrecoverable). Mark error so it
+            // Download is dead (file no longer available / reference unrecoverable). Park it as error so it
             // stops occupying a slot and becomes visible + retriable.
             markReconcileError(file);
             return;
@@ -544,26 +548,34 @@ public class TelegramVerticle extends AbstractVerticle {
             return;
         }
         state.stallAttempts++;
-        // Re-fetch the message first: this renews an expired file reference (the common cause of a
-        // download stuck at 0 bytes). A bare AddFileToDownloads on an already-listed file is a no-op.
-        client.execute(new TdApi.GetMessage(fileRecord.chatId(), fileRecord.messageId()), true)
+        // Re-fetch the message to renew an expired file reference (the common cause of a 0-byte stall).
+        // If the message/chat is gone (e.g. a deleted channel), the file is unrecoverable — give up now.
+        client.execute(new TdApi.GetMessage(fileRecord.chatId(), fileRecord.messageId()))
                 .compose(_ -> client.execute(new TdApi.AddFileToDownloads(file.id, fileRecord.chatId(), fileRecord.messageId(), 32), true))
-                .onSuccess(_ -> log.info("[%s] Reconciliation: resumed stalled download (attempt %d/%d): %s"
+                .onSuccess(_ -> log.debug("[%s] Reconciliation: resume attempt %d/%d: %s"
                         .formatted(getRootId(), state.stallAttempts, MAX_STALL_ATTEMPTS, file.remote.uniqueId)))
-                .onFailure(e -> log.debug("[%s] Reconciliation: resume failed for %s: %s"
-                        .formatted(getRootId(), file.remote.uniqueId, e.getMessage())));
+                .onFailure(e -> {
+                    log.debug("[%s] Reconciliation: source unavailable for %s (%s), giving up"
+                            .formatted(getRootId(), file.remote.uniqueId, e.getMessage()));
+                    markReconcileError(file);
+                });
     }
 
     private void markReconcileError(TdApi.File file) {
         reconcileStates.remove(file.id);
-        DataVerticle.fileRepository.updateDownloadStatus(file.id, file.remote.uniqueId,
-                        file.local != null ? file.local.path : null,
-                        FileRecord.DownloadStatus.error, null)
-                .onSuccess(r -> {
-                    sendFileStatusHttpEvent(file, r);
-                    log.warn("[%s] Reconciliation: gave up on stuck download, marked error: %s"
-                            .formatted(getRootId(), file.remote.uniqueId));
-                });
+        // Evict from TDLib's persistent download list, otherwise it keeps being retried and its
+        // UpdateFile events resurrect the record (CancelDownloadFile alone doesn't remove it from the list).
+        client.execute(new TdApi.RemoveFileFromDownloads(file.id, false), true)
+                .onComplete(_ -> DataVerticle.fileRepository.updateDownloadStatus(file.id, file.remote.uniqueId,
+                                file.local != null ? file.local.path : null,
+                                FileRecord.DownloadStatus.error, null)
+                        .onSuccess(r -> {
+                            if (r != null) {
+                                sendFileStatusHttpEvent(file, r);
+                                log.warn("[%s] Reconciliation: gave up on stuck download, marked error: %s"
+                                        .formatted(getRootId(), file.remote.uniqueId));
+                            }
+                        }));
     }
 
     public Future<Void> cancelDownload(Integer fileId) {
@@ -578,6 +590,7 @@ public class TelegramVerticle extends AbstractVerticle {
                     }
 
                     return client.execute(new TdApi.CancelDownloadFile(fileId, false))
+                            .compose(_ -> client.execute(new TdApi.RemoveFileFromDownloads(fileId, false), true))
                             .map(file);
                 })
                 .compose(file -> client.execute(new TdApi.DeleteFile(fileId)).map(file))
@@ -630,6 +643,8 @@ public class TelegramVerticle extends AbstractVerticle {
                         .getByUniqueId(uniqueId)
                         .map(fileRecord -> Tuple.tuple(file, fileRecord))
                 )
+                // Evict from TDLib's persistent download list so a removed file doesn't get re-added later.
+                .compose(tuple2 -> client.execute(new TdApi.RemoveFileFromDownloads(fileId, false), true).map(tuple2))
                 .compose(tuple2 -> {
                     TdApi.File file = tuple2.v1;
                     FileRecord fileRecord = tuple2.v2;
@@ -1107,6 +1122,14 @@ public class TelegramVerticle extends AbstractVerticle {
                             if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed) &&
                                 fileRecord.isTransferStatus(FileRecord.TransferStatus.completed) &&
                                 FileUtil.exist(fileRecord.localPath())) {
+                                return;
+                            }
+                            // Don't let a passive TDLib update resurrect a download we deliberately parked as
+                            // 'error' (e.g. files from a deleted channel) back to 'idle' — that would make
+                            // auto-download re-pick it and start the stuck loop all over again.
+                            if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.error)
+                                && downloadStatus != FileRecord.DownloadStatus.downloading
+                                && downloadStatus != FileRecord.DownloadStatus.completed) {
                                 return;
                             }
                             if (downloadStatus == null) {
