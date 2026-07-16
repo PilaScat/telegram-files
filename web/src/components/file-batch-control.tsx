@@ -234,7 +234,7 @@ function ControlButton({
           toast({
             title: `${label} action partially completed`,
             description: `Processed ${data.succeeded ?? 0} files, ${data.failed} failed. First error: ${data.failures?.[0]?.error ?? "unknown"}`,
-            variant: "destructive",
+            variant: "error",
           });
         } else {
           toast({
