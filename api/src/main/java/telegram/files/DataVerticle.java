@@ -81,7 +81,9 @@ public class DataVerticle extends AbstractVerticle {
                         settingRepository.createOrUpdate(SettingKey.version.name(), Start.VERSION))
                 // Heal historical duplicate unique_id rows before any verticle touches the table:
                 // they make every "UPDATE ... WHERE unique_id" fail with a composite-PK violation.
-                .compose(r -> fileRepository.deduplicateByUniqueId())
+                // Best-effort — a failure (e.g. an exotic legacy schema) is logged, never fatal.
+                .compose(r -> fileRepository.deduplicateByUniqueId()
+                        .recover(_ -> Future.succeededFuture(0)))
                 .onSuccess(r -> {
                     log.info("Database {} initialized.", Config.DB_TYPE);
                     stopPromise.complete();
