@@ -13,7 +13,7 @@ public interface FileRepository {
 
     Future<Boolean> createIfNotExist(FileRecord fileRecord);
 
-    Future<Boolean> createOrRefreshSource(FileRecord fileRecord);
+    Future<Boolean> createOrRefreshSource(FileRecord fileRecord, boolean pinSource);
 
     Future<Integer> deduplicateByUniqueId();
 

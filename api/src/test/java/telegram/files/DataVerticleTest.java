@@ -208,7 +208,7 @@ public class DataVerticleTest {
                 5, "unique_id", 1, 2, 9, 3, 200, false, 1, 0, "video", null, null, null, null, "fresh", null, null, FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(), 0, null, null, 0, 0, 0
         );
         DataVerticle.fileRepository.create(oldRecord)
-                .compose(r -> DataVerticle.fileRepository.createOrRefreshSource(newSighting))
+                .compose(r -> DataVerticle.fileRepository.createOrRefreshSource(newSighting, false))
                 .compose(created -> {
                     testContext.verify(() -> Assertions.assertFalse(created));
                     return DataVerticle.fileRepository.getByUniqueId("unique_id");
@@ -219,6 +219,34 @@ public class DataVerticleTest {
                     Assertions.assertEquals(9, r.messageId());
                     Assertions.assertEquals(200, r.date());
                     Assertions.assertEquals("fresh", r.caption());
+                    testContext.completeNow();
+                })));
+    }
+
+    @Test
+    @DisplayName("Test pin source moves even completed records to the live message")
+    void createOrRefreshSourcePinTest(Vertx vertx, VertxTestContext testContext) {
+        FileRecord completedRecord = new FileRecord(
+                1, "unique_id", 1, 1, 1, 1, 300, false, 1, 0, "video", null, null, null, null, "old", null, "local_path", FileRecord.DownloadStatus.completed.name(), FileRecord.TransferStatus.idle.name(), 0, null, null, 0, 0, 0
+        );
+        // An older sighting in another chat: pinning must still move the source pointer there.
+        FileRecord olderLiveSighting = new FileRecord(
+                5, "unique_id", 1, 2, 9, 3, 200, false, 1, 0, "video", null, null, null, null, "fresh", null, null, FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(), 0, null, null, 0, 0, 0
+        );
+        DataVerticle.fileRepository.create(completedRecord)
+                .compose(r -> DataVerticle.fileRepository.createOrRefreshSource(olderLiveSighting, true))
+                .compose(created -> {
+                    testContext.verify(() -> Assertions.assertFalse(created));
+                    return DataVerticle.fileRepository.getByUniqueId("unique_id");
+                })
+                .onComplete(testContext.succeeding(r -> testContext.verify(() -> {
+                    Assertions.assertEquals(5, r.id());
+                    Assertions.assertEquals(2, r.chatId());
+                    Assertions.assertEquals(9, r.messageId());
+                    Assertions.assertEquals(200, r.date());
+                    Assertions.assertEquals("fresh", r.caption());
+                    Assertions.assertEquals(FileRecord.DownloadStatus.completed.name(), r.downloadStatus());
+                    Assertions.assertEquals("local_path", r.localPath());
                     testContext.completeNow();
                 })));
     }

@@ -89,21 +89,32 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     }
 
     @Override
-    public Future<Boolean> createOrRefreshSource(FileRecord fileRecord) {
+    public Future<Boolean> createOrRefreshSource(FileRecord fileRecord, boolean pinSource) {
         return this.getByUniqueId(fileRecord.uniqueId())
                 .compose(record -> {
                     if (record == null) {
                         return this.create(fileRecord).map(true)
                                 .recover(_ -> Future.succeededFuture(false));
                     }
-                    if (record.isDownloadStatus(FileRecord.DownloadStatus.completed)
-                        || fileRecord.date() <= record.date()) {
-                        // Same or older sighting: just keep the TDLib file id current.
+                    boolean refresh;
+                    if (pinSource) {
+                        // The caller is downloading from this live message right now: it IS the
+                        // record's source of truth, whatever older/newer sighting is stored. A
+                        // record left pointing at another (possibly dead) chat never matches any
+                        // transfer automation, so its completion events are silently dropped.
+                        refresh = record.chatId() != fileRecord.chatId()
+                                  || record.messageId() != fileRecord.messageId()
+                                  || record.date() != fileRecord.date();
+                    } else {
+                        // Passive sighting (preload scans): only move forward in time and never
+                        // touch completed records.
+                        refresh = !record.isDownloadStatus(FileRecord.DownloadStatus.completed)
+                                  && fileRecord.date() > record.date();
+                    }
+                    if (!refresh) {
+                        // Same sighting: just keep the TDLib file id current.
                         return this.updateFileId(fileRecord.id(), fileRecord.uniqueId()).map(false);
                     }
-                    // The same media was re-posted in a newer message: move the source pointer to the
-                    // live message, otherwise the record keeps referencing a message/chat that may no
-                    // longer exist ("Chat not found" on download) and shows the stale date in the UI.
                     String caption = StrUtil.isNotBlank(fileRecord.caption()) ? fileRecord.caption() : record.caption();
                     // Pin the update to the row selected above ("AND id = oldId"): a plain
                     // "WHERE unique_id" would collapse leftover duplicate rows onto one id and
@@ -112,8 +123,8 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                             .forUpdate(sqlClient, """
                                     UPDATE file_record SET id = #{id}, chat_id = #{chatId}, message_id = #{messageId},
                                                            media_album_id = #{mediaAlbumId}, date = #{date}, caption = #{caption}
-                                    WHERE unique_id = #{uniqueId} AND id = #{oldId} AND download_status != 'completed'
-                                    """)
+                                    WHERE unique_id = #{uniqueId} AND id = #{oldId} %s
+                                    """.formatted(pinSource ? "" : "AND download_status != 'completed'"))
                             .execute(MapUtil.ofEntries(
                                     MapUtil.entry("id", fileRecord.id()),
                                     MapUtil.entry("oldId", record.id()),

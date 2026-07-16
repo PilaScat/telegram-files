@@ -332,37 +332,62 @@ public class TelegramVerticle extends AbstractVerticle {
                     TdApi.Message message = results.v2;
                     TdApi.MessageThreadInfo messageThreadInfo = results.v3;
                     FileRecord dbFileRecord = results.v4;
-                    if (file.local != null) {
-                        if (file.local.isDownloadingCompleted) {
-                            return syncFileDownloadStatus(file, message, messageThreadInfo)
-                                    .compose(_ -> DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId));
-                        }
-                        if (file.local.isDownloadingActive) {
-                            return Future.failedFuture("File is downloading");
-                        }
+
+                    // Pin the record to the message we're downloading from, before anything else:
+                    // it is the live source of truth. A stale pointer at another (possibly dead)
+                    // chat breaks the transfer-automation lookup on completion and shows a wrong
+                    // date in the UI.
+                    Optional<TdApiHelp.FileHandler<? extends TdApi.MessageContent>> fileHandlerOptional =
+                            TdApiHelp.getFileHandler(message);
+                    Future<?> pinned = fileHandlerOptional.isEmpty()
+                            ? Future.succeededFuture()
+                            : DataVerticle.fileRepository.createOrRefreshSource(
+                            fileHandlerOptional.get().convertFileRecord(telegramRecord.id()).withThreadInfo(messageThreadInfo), true);
+
+                    return pinned.compose(_ -> {
+                        if (file.local != null) {
+                            if (file.local.isDownloadingCompleted) {
+                                return syncFileDownloadStatus(file, message, messageThreadInfo)
+                                        .recover(err -> {
+                                            // Sync "fails" by design when the file was already downloaded.
+                                            // After the pin above, re-announce the completion so the
+                                            // transfer automation of THIS chat re-evaluates the file
+                                            // (heals completed-but-never-transferred records).
+                                            sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+                                                    .put("fileId", file.id)
+                                                    .put("uniqueId", file.remote.uniqueId)
+                                                    .put("downloadStatus", FileRecord.DownloadStatus.completed)
+                                            ));
+                                            return Future.succeededFuture();
+                                        })
+                                        .compose(_ -> DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId));
+                            }
+                            if (file.local.isDownloadingActive) {
+                                return Future.failedFuture("File is downloading");
+                            }
 //                        return Future.failedFuture("Unknown file download status");
-                    }
-                    if (dbFileRecord != null
-                        && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)
-                        && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.error)) {
-                        return Future.failedFuture("File is already downloading or completed");
-                    }
+                        }
+                        if (dbFileRecord != null
+                            && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)
+                            && !dbFileRecord.isDownloadStatus(FileRecord.DownloadStatus.error)) {
+                            return Future.failedFuture("File is already downloading or completed");
+                        }
 
-                    TdApiHelp.FileHandler<? extends TdApi.MessageContent> fileHandler = TdApiHelp.getFileHandler(message)
-                            .orElseThrow(() -> VertxException.noStackTrace("not support message type"));
-                    FileRecord fileRecord = fileHandler.convertFileRecord(telegramRecord.id()).withThreadInfo(messageThreadInfo);
-                    return DataVerticle.fileRepository.createOrRefreshSource(fileRecord)
-                            .compose(ignore -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32)))
-                            .onSuccess(ignore -> {
-                                sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
-                                        .put("fileId", fileId)
-                                        .put("uniqueId", fileRecord.uniqueId())
-                                        .put("downloadStatus", FileRecord.DownloadStatus.downloading)
-                                ));
+                        TdApiHelp.FileHandler<? extends TdApi.MessageContent> fileHandler = fileHandlerOptional
+                                .orElseThrow(() -> VertxException.noStackTrace("not support message type"));
+                        FileRecord fileRecord = fileHandler.convertFileRecord(telegramRecord.id()).withThreadInfo(messageThreadInfo);
+                        return client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32))
+                                .onSuccess(ignore -> {
+                                    sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+                                            .put("fileId", fileId)
+                                            .put("uniqueId", fileRecord.uniqueId())
+                                            .put("downloadStatus", FileRecord.DownloadStatus.downloading)
+                                    ));
 
-                                downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
-                            })
-                            .map(fileRecord);
+                                    downloadThumbnail(chatId, messageId, fileHandler.convertThumbnailRecord(telegramRecord.id()));
+                                })
+                                .map(fileRecord);
+                    });
                 });
     }
 

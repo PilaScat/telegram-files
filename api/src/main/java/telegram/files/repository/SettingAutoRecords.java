@@ -58,8 +58,8 @@ public class SettingAutoRecords {
         }
 
         /**
-         * Clears the history-scan completion flags and scan positions so preload and download
-         * re-scan the chat history from the newest message.
+         * Clears the history-scan completion flags and scan positions so preload, download and
+         * transfer re-scan the chat history from the newest message.
          */
         @JsonIgnore
         public void resetHistoryScanState() {
@@ -67,6 +67,7 @@ public class SettingAutoRecords {
             bitState.disableState(HISTORY_PRELOAD_STATE);
             bitState.disableState(HISTORY_DOWNLOAD_STATE);
             bitState.disableState(HISTORY_DOWNLOAD_SCAN_STATE);
+            bitState.disableState(HISTORY_TRANSFER_STATE);
             state = bitState.getState();
             if (preload != null) {
                 preload.nextFromMessageId = 0;

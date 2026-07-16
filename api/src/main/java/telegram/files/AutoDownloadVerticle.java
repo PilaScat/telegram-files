@@ -173,6 +173,7 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                     scanThread.nextFileType,
                     scanThread.nextFromMessageId);
             scanParams.messageThreadId = scanThread.messageThreadId;
+            scanParams.transferEnabled = auto.transfer != null && auto.transfer.enabled;
             addHistoryMessage(scanParams,
                     result -> {
                         scanThread.nextFileType = result.nextFileType;
@@ -187,12 +188,14 @@ public class AutoDownloadVerticle extends AbstractVerticle {
     }
 
     private void addHistoryMessage(SettingAutoRecords.Automation auto) {
-        addHistoryMessage(new ScanParams(auto.uniqueKey(),
-                        auto.download.rule,
-                        auto.telegramId,
-                        auto.chatId,
-                        auto.download.nextFileType,
-                        auto.download.nextFromMessageId),
+        ScanParams scanParams = new ScanParams(auto.uniqueKey(),
+                auto.download.rule,
+                auto.telegramId,
+                auto.chatId,
+                auto.download.nextFileType,
+                auto.download.nextFromMessageId);
+        scanParams.transferEnabled = auto.transfer != null && auto.transfer.enabled;
+        addHistoryMessage(scanParams,
                 result -> {
                     auto.download.nextFileType = result.nextFileType;
                     auto.download.nextFromMessageId = result.nextFromMessageId;
@@ -281,10 +284,19 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                     String uniqueId = TdApiHelp.getFileUniqueId(message);
                                     if (!existFiles.containsKey(uniqueId)) {
                                         return true;
-                                    } else {
-                                        FileRecord fileRecord = existFiles.get(uniqueId);
-                                        return fileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle);
                                     }
+                                    FileRecord fileRecord = existFiles.get(uniqueId);
+                                    if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                                        return true;
+                                    }
+                                    // Heal files that completed under another chat's (stale) record but
+                                    // were never transferred: re-running startDownload pins the record to
+                                    // this chat and re-announces the completion, so this chat's transfer
+                                    // automation finally picks them up.
+                                    return params.transferEnabled
+                                           && fileRecord.chatId() != chatId
+                                           && fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed)
+                                           && fileRecord.isTransferStatus(FileRecord.TransferStatus.idle);
                                 })
                                 .toList();
                         if (CollUtil.isEmpty(messages)) {
@@ -450,6 +462,10 @@ public class AutoDownloadVerticle extends AbstractVerticle {
         public long chatId;
 
         public long messageThreadId;
+
+        // Whether the automation that owns this scan also has transfer enabled (used to re-pick
+        // completed-but-never-transferred files recorded under another chat).
+        public boolean transferEnabled;
 
         public String nextFileType;
 
