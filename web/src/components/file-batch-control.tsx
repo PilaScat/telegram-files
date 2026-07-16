@@ -224,13 +224,25 @@ function ControlButton({
       },
     ) => POST(key, arg),
     {
-      onSuccess: () => {
+      onSuccess: (data: {
+        succeeded?: number;
+        failed?: number;
+        failures?: Array<{ error?: string }>;
+      }) => {
         setSelectedFiles(new Set());
-        toast({
-          title: `${label} action completed`,
-          description: `Successfully processed ${validFiles.length} files.`,
-          variant: "success",
-        });
+        if (data?.failed && data.failed > 0) {
+          toast({
+            title: `${label} action partially completed`,
+            description: `Processed ${data.succeeded ?? 0} files, ${data.failed} failed. First error: ${data.failures?.[0]?.error ?? "unknown"}`,
+            variant: "destructive",
+          });
+        } else {
+          toast({
+            title: `${label} action completed`,
+            description: `Successfully processed ${validFiles.length} files.`,
+            variant: "success",
+          });
+        }
       },
     },
   );

@@ -310,11 +310,14 @@ public class TelegramVerticle extends AbstractVerticle {
     }
 
     public Future<FileRecord> startDownload(Long chatId, Long messageId, Integer fileId) {
-        return Future.all(
+        // GetChat first (errors ignored): TDLib only knows chats it has already loaded in this
+        // session, and GetMessage fails with "Chat not found" for a chat that merely isn't loaded.
+        return client.execute(new TdApi.GetChat(chatId), true)
+                .compose(_ -> Future.all(
                         client.execute(new TdApi.GetFile(fileId)),
                         client.execute(new TdApi.GetMessage(chatId, messageId)),
                         client.execute(new TdApi.GetMessageThread(chatId, messageId), true)
-                )
+                ))
                 .compose(results -> {
                     TdApi.File file = results.resultAt(0);
                     return DataVerticle.fileRepository.getByUniqueId(file.remote.uniqueId)
@@ -348,13 +351,7 @@ public class TelegramVerticle extends AbstractVerticle {
                     TdApiHelp.FileHandler<? extends TdApi.MessageContent> fileHandler = TdApiHelp.getFileHandler(message)
                             .orElseThrow(() -> VertxException.noStackTrace("not support message type"));
                     FileRecord fileRecord = fileHandler.convertFileRecord(telegramRecord.id()).withThreadInfo(messageThreadInfo);
-                    return DataVerticle.fileRepository.createIfNotExist(fileRecord)
-                            .compose(created -> {
-                                if (!created) {
-                                    return DataVerticle.fileRepository.updateFileId(fileRecord.id(), fileRecord.uniqueId());
-                                }
-                                return Future.succeededFuture();
-                            })
+                    return DataVerticle.fileRepository.createOrRefreshSource(fileRecord)
                             .compose(ignore -> client.execute(new TdApi.AddFileToDownloads(fileId, chatId, messageId, 32)))
                             .onSuccess(ignore -> {
                                 sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
@@ -583,6 +580,33 @@ public class TelegramVerticle extends AbstractVerticle {
                                         .formatted(getRootId(), file.remote.uniqueId));
                             }
                         }));
+    }
+
+    /**
+     * Parks an idle record whose source is permanently gone (deleted chat or message, so the
+     * download can never start) as 'error', making it visible and retriable in the UI instead
+     * of sitting invisible among the idle files forever.
+     */
+    public void parkUnrecoverableRecord(String uniqueId) {
+        DataVerticle.fileRepository.getByUniqueId(uniqueId)
+                .compose(record -> {
+                    if (record == null || !record.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
+                        return Future.succeededFuture(null);
+                    }
+                    return DataVerticle.fileRepository.updateDownloadStatus(record.id(), uniqueId,
+                                    record.localPath(), FileRecord.DownloadStatus.error, record.completionDate())
+                            .onSuccess(r -> {
+                                if (r != null) {
+                                    sendEvent(EventPayload.build(EventPayload.TYPE_FILE_STATUS, new JsonObject()
+                                            .put("fileId", record.id())
+                                            .put("uniqueId", uniqueId)
+                                            .put("downloadStatus", FileRecord.DownloadStatus.error)
+                                    ));
+                                    log.warn("[%s] Parked record with unrecoverable source as error: %s"
+                                            .formatted(getRootId(), uniqueId));
+                                }
+                            });
+                });
     }
 
     public Future<Void> cancelDownload(Integer fileId) {

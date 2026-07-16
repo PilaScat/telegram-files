@@ -682,8 +682,21 @@ public class HttpVerticle extends AbstractVerticle {
             if (chatId == null || messageId == null || fileId == null) {
                 return Future.failedFuture("Invalid parameters");
             }
-            return telegramVerticle.startDownload(chatId, messageId, fileId);
+            return telegramVerticle.startDownload(chatId, messageId, fileId)
+                    .onFailure(e -> {
+                        // The record points at a message that no longer exists anywhere (deleted
+                        // chat or message): park it as 'error' so it stops hiding among the idle files.
+                        String uniqueId = file.getString("uniqueId");
+                        if (StrUtil.isNotBlank(uniqueId) && isUnrecoverableSourceError(e)) {
+                            telegramVerticle.parkUnrecoverableRecord(uniqueId);
+                        }
+                    });
         });
+    }
+
+    private static boolean isUnrecoverableSourceError(Throwable e) {
+        String message = e == null ? null : e.getMessage();
+        return message != null && (message.contains("Chat not found") || message.contains("Message not found"));
     }
 
     private void handleFileCancelDownloadMultiple(RoutingContext ctx) {
@@ -747,28 +760,32 @@ public class HttpVerticle extends AbstractVerticle {
             ctx.fail(400);
             return;
         }
-        Map<Long, List<Object>> groupingByTelegramId = files.stream()
-                .collect(Collectors.groupingBy(f -> ((JsonObject) f).getLong("telegramId")));
-
-        Future.all(groupingByTelegramId.entrySet()
-                        .stream()
-                        .flatMap(entry -> {
-                            TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(entry.getKey());
-
-                            return files.stream()
-                                    .map(f -> {
-                                        JsonObject file = (JsonObject) f;
-                                        return handler.apply(telegramVerticle, file);
-                                    });
-                        })
-                        .toList()
-                )
-                .onSuccess(ctx::json).onFailure(r -> {
-                    log.error(r, "Failed to handle multiple files: %s".formatted(r.getMessage()));
-                    ctx.response()
-                            .setStatusCode(400)
-                            .end(JsonObject.of("error", "Part of the files failed to process: %s".formatted(r.getMessage())).encode());
-                });
+        List<JsonObject> fileList = files.stream().map(f -> (JsonObject) f).toList();
+        List<JsonObject> failures = Collections.synchronizedList(new ArrayList<>());
+        List<Future<?>> futures = fileList.stream()
+                .<Future<?>>map(file -> {
+                    Future<?> future;
+                    try {
+                        TelegramVerticle telegramVerticle = TelegramVerticles.getOrElseThrow(file.getLong("telegramId"));
+                        future = handler.apply(telegramVerticle, file);
+                    } catch (Exception e) {
+                        future = Future.failedFuture(e);
+                    }
+                    return future.onFailure(r -> {
+                        log.error("Failed to handle file (chatId: %s, messageId: %s, fileId: %s): %s"
+                                .formatted(file.getLong("chatId"), file.getLong("messageId"), file.getInteger("fileId"), r.getMessage()));
+                        failures.add(JsonObject.of("fileId", file.getInteger("fileId"),
+                                "uniqueId", file.getString("uniqueId"),
+                                "error", r.getMessage()));
+                    });
+                })
+                .collect(Collectors.toList());
+        // join (unlike all) waits for every file, so one stale record can't abort or mask the rest
+        Future.join(futures).onComplete(_ ->
+                ctx.json(JsonObject.of("total", fileList.size(),
+                        "succeeded", fileList.size() - failures.size(),
+                        "failed", failures.size(),
+                        "failures", new JsonArray(List.copyOf(failures)))));
     }
 
     private void handleAutoSettingsUpdate(RoutingContext ctx) {

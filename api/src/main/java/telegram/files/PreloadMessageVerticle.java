@@ -102,7 +102,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
             TdApi.MessageThreadInfo messageThreadInfo = Future.await(telegramVerticle.client
                     .execute(new TdApi.GetMessageThread(message.chatId, message.id), true));
             FileRecord fileRecord = fileHandlerOptional.get().convertFileRecord(auto.telegramId).withThreadInfo(messageThreadInfo);
-            if (Future.await(DataVerticle.fileRepository.createIfNotExist(fileRecord))) {
+            if (Future.await(DataVerticle.fileRepository.createOrRefreshSource(fileRecord))) {
                 count++;
             }
         }
@@ -134,7 +134,7 @@ public class PreloadMessageVerticle extends AbstractVerticle {
                                 TdApi.MessageThreadInfo messageThreadInfo = result.resultAt(1);
                                 TdApiHelp.getFileHandler(message).ifPresent(fileHandler -> {
                                     FileRecord fileRecord = fileHandler.convertFileRecord(telegramId).withThreadInfo(messageThreadInfo);
-                                    DataVerticle.fileRepository.createIfNotExist(fileRecord);
+                                    DataVerticle.fileRepository.createOrRefreshSource(fileRecord);
                                 });
                             })
                             .onFailure(e -> log.error("Preload message fail. Get message failed: %s".formatted(e.getMessage())));

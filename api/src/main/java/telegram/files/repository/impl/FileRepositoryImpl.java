@@ -89,6 +89,45 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
     }
 
     @Override
+    public Future<Boolean> createOrRefreshSource(FileRecord fileRecord) {
+        return this.getByUniqueId(fileRecord.uniqueId())
+                .compose(record -> {
+                    if (record == null) {
+                        return this.create(fileRecord).map(true)
+                                .recover(_ -> Future.succeededFuture(false));
+                    }
+                    if (record.isDownloadStatus(FileRecord.DownloadStatus.completed)
+                        || fileRecord.date() <= record.date()) {
+                        // Same or older sighting: just keep the TDLib file id current.
+                        return this.updateFileId(fileRecord.id(), fileRecord.uniqueId()).map(false);
+                    }
+                    // The same media was re-posted in a newer message: move the source pointer to the
+                    // live message, otherwise the record keeps referencing a message/chat that may no
+                    // longer exist ("Chat not found" on download) and shows the stale date in the UI.
+                    String caption = StrUtil.isNotBlank(fileRecord.caption()) ? fileRecord.caption() : record.caption();
+                    return SqlTemplate
+                            .forUpdate(sqlClient, """
+                                    UPDATE file_record SET id = #{id}, chat_id = #{chatId}, message_id = #{messageId},
+                                                           media_album_id = #{mediaAlbumId}, date = #{date}, caption = #{caption}
+                                    WHERE unique_id = #{uniqueId} AND download_status != 'completed'
+                                    """)
+                            .execute(MapUtil.ofEntries(
+                                    MapUtil.entry("id", fileRecord.id()),
+                                    MapUtil.entry("chatId", fileRecord.chatId()),
+                                    MapUtil.entry("messageId", fileRecord.messageId()),
+                                    MapUtil.entry("mediaAlbumId", fileRecord.mediaAlbumId()),
+                                    MapUtil.entry("date", fileRecord.date()),
+                                    MapUtil.entry("caption", caption),
+                                    MapUtil.entry("uniqueId", fileRecord.uniqueId())
+                            ))
+                            .onSuccess(_ -> log.debug("Refreshed source of %s to chat %d message %d"
+                                    .formatted(fileRecord.uniqueId(), fileRecord.chatId(), fileRecord.messageId())))
+                            .onFailure(err -> log.error("Failed to refresh file record source: %s".formatted(err.getMessage())))
+                            .map(false);
+                });
+    }
+
+    @Override
     public Future<Tuple3<List<FileRecord>, Long, Long>> getFiles(long chatId, Map<String, String> filter) {
         String search = filter.get("search");
         String type = filter.get("type");

@@ -56,6 +56,26 @@ public class SettingAutoRecords {
         public boolean isNotComplete(int bitwise) {
             return !isComplete(bitwise);
         }
+
+        /**
+         * Clears the history-scan completion flags and scan positions so preload and download
+         * re-scan the chat history from the newest message.
+         */
+        @JsonIgnore
+        public void resetHistoryScanState() {
+            MessyUtils.BitState bitState = new MessyUtils.BitState(state);
+            bitState.disableState(HISTORY_PRELOAD_STATE);
+            bitState.disableState(HISTORY_DOWNLOAD_STATE);
+            bitState.disableState(HISTORY_DOWNLOAD_SCAN_STATE);
+            state = bitState.getState();
+            if (preload != null) {
+                preload.nextFromMessageId = 0;
+            }
+            if (download != null) {
+                download.nextFromMessageId = 0;
+                download.nextFileType = null;
+            }
+        }
     }
 
     public static class PreloadConfig {

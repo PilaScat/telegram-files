@@ -45,8 +45,13 @@ public class AutomationsHolder {
                         return;
                     }
                     settingAutoRecords.automations.forEach(item -> TelegramVerticles.get(item.telegramId)
-                            .ifPresentOrElse(_ -> AUTO_RECORDS.add(item),
-                                    () -> log.warn("Init auto records fail. Telegram verticle not found: %s".formatted(item.telegramId))));
+                            .ifPresentOrElse(_ -> {
+                                // Re-scan chat history on every boot: the scan cheaply skips already
+                                // known non-idle records, and this recovers messages posted while the
+                                // app was down as well as stale idle records whose media was re-posted.
+                                item.resetHistoryScanState();
+                                AUTO_RECORDS.add(item);
+                            }, () -> log.warn("Init auto records fail. Telegram verticle not found: %s".formatted(item.telegramId))));
                 })
                 .onFailure(e -> log.error("Init auto records failed!", e))
                 .mapEmpty();
