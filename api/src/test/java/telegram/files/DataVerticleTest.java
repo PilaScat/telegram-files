@@ -176,6 +176,54 @@ public class DataVerticleTest {
     }
 
     @Test
+    @DisplayName("Test deduplicate file records by unique id")
+    void deduplicateByUniqueIdTest(Vertx vertx, VertxTestContext testContext) {
+        FileRecord idleRecord = new FileRecord(
+                1, "unique_id", 1, 1, 1, 1, 1, false, 1, 0, "video", null, null, null, null, "old", null, null, FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(), 0, null, null, 0, 0, 0
+        );
+        FileRecord completedRecord = new FileRecord(
+                2, "unique_id", 1, 1, 2, 1, 2, false, 1, 0, "video", null, null, null, null, "new", null, "local_path", FileRecord.DownloadStatus.completed.name(), FileRecord.TransferStatus.completed.name(), 0, null, null, 0, 0, 0
+        );
+        DataVerticle.fileRepository.create(idleRecord)
+                .compose(r -> DataVerticle.fileRepository.create(completedRecord))
+                .compose(r -> DataVerticle.fileRepository.deduplicateByUniqueId())
+                .compose(removed -> {
+                    testContext.verify(() -> Assertions.assertEquals(1, removed));
+                    return DataVerticle.fileRepository.getByUniqueId("unique_id");
+                })
+                .onComplete(testContext.succeeding(r -> testContext.verify(() -> {
+                    Assertions.assertEquals(2, r.id());
+                    Assertions.assertEquals(FileRecord.DownloadStatus.completed.name(), r.downloadStatus());
+                    testContext.completeNow();
+                })));
+    }
+
+    @Test
+    @DisplayName("Test refresh source pointer on a newer sighting")
+    void createOrRefreshSourceTest(Vertx vertx, VertxTestContext testContext) {
+        FileRecord oldRecord = new FileRecord(
+                1, "unique_id", 1, 1, 1, 1, 100, false, 1, 0, "video", null, null, null, null, "old", null, null, FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(), 0, null, null, 0, 0, 0
+        );
+        FileRecord newSighting = new FileRecord(
+                5, "unique_id", 1, 2, 9, 3, 200, false, 1, 0, "video", null, null, null, null, "fresh", null, null, FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(), 0, null, null, 0, 0, 0
+        );
+        DataVerticle.fileRepository.create(oldRecord)
+                .compose(r -> DataVerticle.fileRepository.createOrRefreshSource(newSighting))
+                .compose(created -> {
+                    testContext.verify(() -> Assertions.assertFalse(created));
+                    return DataVerticle.fileRepository.getByUniqueId("unique_id");
+                })
+                .onComplete(testContext.succeeding(r -> testContext.verify(() -> {
+                    Assertions.assertEquals(5, r.id());
+                    Assertions.assertEquals(2, r.chatId());
+                    Assertions.assertEquals(9, r.messageId());
+                    Assertions.assertEquals(200, r.date());
+                    Assertions.assertEquals("fresh", r.caption());
+                    testContext.completeNow();
+                })));
+    }
+
+    @Test
     @DisplayName("Test update file transfer status")
     void updateFileTransferStatusTest(Vertx vertx, VertxTestContext testContext) {
         FileRecord fileRecord = new FileRecord(

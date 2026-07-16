@@ -105,14 +105,18 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     // live message, otherwise the record keeps referencing a message/chat that may no
                     // longer exist ("Chat not found" on download) and shows the stale date in the UI.
                     String caption = StrUtil.isNotBlank(fileRecord.caption()) ? fileRecord.caption() : record.caption();
+                    // Pin the update to the row selected above ("AND id = oldId"): a plain
+                    // "WHERE unique_id" would collapse leftover duplicate rows onto one id and
+                    // violate the composite PK.
                     return SqlTemplate
                             .forUpdate(sqlClient, """
                                     UPDATE file_record SET id = #{id}, chat_id = #{chatId}, message_id = #{messageId},
                                                            media_album_id = #{mediaAlbumId}, date = #{date}, caption = #{caption}
-                                    WHERE unique_id = #{uniqueId} AND download_status != 'completed'
+                                    WHERE unique_id = #{uniqueId} AND id = #{oldId} AND download_status != 'completed'
                                     """)
                             .execute(MapUtil.ofEntries(
                                     MapUtil.entry("id", fileRecord.id()),
+                                    MapUtil.entry("oldId", record.id()),
                                     MapUtil.entry("chatId", fileRecord.chatId()),
                                     MapUtil.entry("messageId", fileRecord.messageId()),
                                     MapUtil.entry("mediaAlbumId", fileRecord.mediaAlbumId()),
@@ -125,6 +129,68 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                             .onFailure(err -> log.error("Failed to refresh file record source: %s".formatted(err.getMessage())))
                             .map(false);
                 });
+    }
+
+    /**
+     * Ranks duplicate rows of the same unique_id: the row that carries the most progress wins.
+     * Prefer the user-facing media row over a thumbnail row, then the most advanced download
+     * status, then a row that knows its file on disk, then the newest sighting.
+     */
+    private static final Comparator<FileRecord> DUPLICATE_PRIORITY = Comparator
+            .<FileRecord>comparingInt(r -> Objects.equals(r.type(), "thumbnail") ? 1 : 0)
+            .thenComparingInt(r -> switch (StrUtil.blankToDefault(r.downloadStatus(), "idle")) {
+                case "completed" -> 0;
+                case "downloading" -> 1;
+                case "paused" -> 2;
+                case "error" -> 3;
+                default -> 4;
+            })
+            .thenComparingInt(r -> StrUtil.isBlank(r.localPath()) ? 1 : 0)
+            .thenComparing(Comparator.comparingInt(FileRecord::date).reversed())
+            .thenComparing(Comparator.comparingInt(FileRecord::id).reversed());
+
+    /**
+     * Removes duplicate rows sharing the same unique_id. The composite PK (id, unique_id) let
+     * them accumulate historically (the same media recorded again under a new TDLib file id),
+     * and they break every "UPDATE ... WHERE unique_id" with a PK violation as soon as the
+     * duplicates collapse onto the same id. Keeps the most advanced row per unique_id.
+     */
+    @Override
+    public Future<Integer> deduplicateByUniqueId() {
+        return SqlTemplate
+                .forQuery(sqlClient, """
+                        SELECT * FROM file_record WHERE unique_id IN (
+                            SELECT unique_id FROM file_record GROUP BY unique_id HAVING COUNT(*) > 1
+                        )
+                        """)
+                .mapTo(FileRecord.ROW_MAPPER)
+                .execute(Map.of())
+                .compose(rs -> {
+                    Map<String, List<FileRecord>> groups = new HashMap<>();
+                    rs.forEach(r -> groups.computeIfAbsent(r.uniqueId(), _ -> new ArrayList<>()).add(r));
+                    List<FileRecord> losers = new ArrayList<>();
+                    groups.values().forEach(records -> {
+                        records.sort(DUPLICATE_PRIORITY);
+                        losers.addAll(records.subList(1, records.size()));
+                    });
+                    if (losers.isEmpty()) {
+                        return Future.succeededFuture(0);
+                    }
+                    return Future.all(losers.stream()
+                                    .map(r -> SqlTemplate
+                                            .forUpdate(sqlClient, """
+                                                    DELETE FROM file_record WHERE id = #{id} AND unique_id = #{uniqueId}
+                                                    """)
+                                            .execute(Map.of("id", r.id(), "uniqueId", r.uniqueId())))
+                                    .toList())
+                            .map(losers.size());
+                })
+                .onSuccess(count -> {
+                    if (count > 0) {
+                        log.info("Removed %d duplicate file records".formatted(count));
+                    }
+                })
+                .onFailure(err -> log.error("Failed to deduplicate file records: %s".formatted(err.getMessage())));
     }
 
     @Override
@@ -617,15 +683,18 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                         return Future.succeededFuture(null);
                     }
 
+                    // "AND id = oldId" pins the update to the row selected above, so leftover
+                    // duplicate unique_id rows can't collapse onto one id (composite PK violation).
                     return SqlTemplate
                             .forUpdate(sqlClient, """
                                     UPDATE file_record SET id = #{fileId},
                                                            local_path = #{localPath},
                                                            download_status = #{downloadStatus},
                                                            completion_date = #{completionDate}
-                                    WHERE unique_id = #{uniqueId}
+                                    WHERE unique_id = #{uniqueId} AND id = #{oldId}
                                     """)
                             .execute(MapUtil.ofEntries(MapUtil.entry("fileId", fileId),
+                                    MapUtil.entry("oldId", record.id()),
                                     MapUtil.entry("uniqueId", uniqueId),
                                     MapUtil.entry("localPath", pathUpdated ? localPath : record.localPath()),
                                     MapUtil.entry("downloadStatus", downloadStatusUpdated ? downloadStatus.name() : record.downloadStatus()),
@@ -707,11 +776,13 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     if (record == null || record.id() == fileId) {
                         return Future.succeededFuture();
                     }
+                    // "AND id = oldId" pins the update to the row selected above, so leftover
+                    // duplicate unique_id rows can't collapse onto one id (composite PK violation).
                     return SqlTemplate
                             .forUpdate(sqlClient, """
-                                    UPDATE file_record SET id = #{fileId} WHERE unique_id = #{uniqueId}
+                                    UPDATE file_record SET id = #{fileId} WHERE unique_id = #{uniqueId} AND id = #{oldId}
                                     """)
-                            .execute(Map.of("fileId", fileId, "uniqueId", uniqueId))
+                            .execute(Map.of("fileId", fileId, "uniqueId", uniqueId, "oldId", record.id()))
                             .onFailure(err ->
                                     log.error("Failed to update file record: %s".formatted(err.getMessage()))
                             )

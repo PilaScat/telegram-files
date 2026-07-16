@@ -1171,7 +1171,9 @@ public class TelegramVerticle extends AbstractVerticle {
                                             finalLocalPath,
                                             downloadStatus,
                                             finalCompletionDate)
-                                    .onSuccess(r -> sendFileStatusHttpEvent(file, r));
+                                    .onSuccess(r -> sendFileStatusHttpEvent(file, r))
+                                    .onFailure(e -> log.error("[%s] Failed to update file status of %s: %s"
+                                            .formatted(getRootId(), file.remote.uniqueId, e.getMessage())));
                         }
                     });
 
