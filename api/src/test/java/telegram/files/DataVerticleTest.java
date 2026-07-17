@@ -252,6 +252,32 @@ public class DataVerticleTest {
     }
 
     @Test
+    @DisplayName("Test repair transferred records flipped back to idle")
+    void repairTransferredRecordsTest(Vertx vertx, VertxTestContext testContext) {
+        FileRecord flippedRecord = new FileRecord(
+                1, "unique_id", 1, 1, 1, 1, 1, false, 1, 0, "video", null, null, null, null, null, null, "/stash/video/x.mp4", FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.completed.name(), 0, null, null, 0, 0, 0
+        );
+        FileRecord untouchedRecord = new FileRecord(
+                2, "unique_id_2", 1, 1, 2, 1, 2, false, 1, 0, "video", null, null, null, null, null, null, null, FileRecord.DownloadStatus.idle.name(), FileRecord.TransferStatus.idle.name(), 0, null, null, 0, 0, 0
+        );
+        DataVerticle.fileRepository.create(flippedRecord)
+                .compose(r -> DataVerticle.fileRepository.create(untouchedRecord))
+                .compose(r -> DataVerticle.fileRepository.repairTransferredRecords())
+                .compose(repaired -> {
+                    testContext.verify(() -> Assertions.assertEquals(1, repaired));
+                    return DataVerticle.fileRepository.getByUniqueId("unique_id");
+                })
+                .compose(r -> {
+                    testContext.verify(() -> Assertions.assertEquals(FileRecord.DownloadStatus.completed.name(), r.downloadStatus()));
+                    return DataVerticle.fileRepository.getByUniqueId("unique_id_2");
+                })
+                .onComplete(testContext.succeeding(r -> testContext.verify(() -> {
+                    Assertions.assertEquals(FileRecord.DownloadStatus.idle.name(), r.downloadStatus());
+                    testContext.completeNow();
+                })));
+    }
+
+    @Test
     @DisplayName("Test update file transfer status")
     void updateFileTransferStatusTest(Vertx vertx, VertxTestContext testContext) {
         FileRecord fileRecord = new FileRecord(

@@ -204,6 +204,28 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                 .onFailure(err -> log.error("Failed to deduplicate file records: %s".formatted(err.getMessage())));
     }
 
+    /**
+     * A record whose transfer completed is an archived file: its download can only be
+     * 'completed'. Records flipped back to 'idle'/'error' by the onFileUpdated bug made the
+     * boot rescan re-download the whole archive; repair them at boot.
+     */
+    @Override
+    public Future<Integer> repairTransferredRecords() {
+        return SqlTemplate
+                .forUpdate(sqlClient, """
+                        UPDATE file_record SET download_status = 'completed'
+                        WHERE transfer_status = 'completed' AND download_status IN ('idle', 'error')
+                        """)
+                .execute(Map.of())
+                .map(SqlResult::rowCount)
+                .onSuccess(count -> {
+                    if (count > 0) {
+                        log.info("Repaired %d transferred records that had flipped back to idle/error".formatted(count));
+                    }
+                })
+                .onFailure(err -> log.error("Failed to repair transferred records: %s".formatted(err.getMessage())));
+    }
+
     @Override
     public Future<Tuple3<List<FileRecord>, Long, Long>> getFiles(long chatId, Map<String, String> filter) {
         String search = filter.get("search");

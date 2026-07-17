@@ -17,6 +17,8 @@ public interface FileRepository {
 
     Future<Integer> deduplicateByUniqueId();
 
+    Future<Integer> repairTransferredRecords();
+
     Future<Tuple3<List<FileRecord>, Long, Long>> getFiles(long chatId, Map<String, String> filter);
 
     Future<Map<String, FileRecord>> getFilesByUniqueId(List<String> uniqueIds);

@@ -1175,9 +1175,17 @@ public class TelegramVerticle extends AbstractVerticle {
                         FileRecord.DownloadStatus downloadStatus = TdApiHelp.getDownloadStatus(file);
 
                         if (fileRecord != null) {
-                            if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed) &&
-                                fileRecord.isTransferStatus(FileRecord.TransferStatus.completed) &&
-                                FileUtil.exist(fileRecord.localPath())) {
+                            // A transferred file lives at its destination: TDLib's view of its own
+                            // cache copy (moved away, so "not downloaded") must never touch the
+                            // record. This bug flipped thousands of archived records back to 'idle'
+                            // and made the boot rescan re-download the whole archive.
+                            if (fileRecord.isTransferStatus(FileRecord.TransferStatus.completed)) {
+                                return;
+                            }
+                            // 'completed' is terminal for passive updates too: only an explicit user
+                            // action (remove/re-download) may downgrade it.
+                            if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.completed)
+                                && downloadStatus != FileRecord.DownloadStatus.completed) {
                                 return;
                             }
                             // Don't let a passive TDLib update resurrect a download we deliberately parked as

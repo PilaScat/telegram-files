@@ -287,7 +287,10 @@ public class AutoDownloadVerticle extends AbstractVerticle {
                                     }
                                     FileRecord fileRecord = existFiles.get(uniqueId);
                                     if (fileRecord.isDownloadStatus(FileRecord.DownloadStatus.idle)) {
-                                        return true;
+                                        // An idle record whose transfer already completed is an archived
+                                        // file whose record got corrupted (see onFileUpdated): the file is
+                                        // at the destination — never re-download it.
+                                        return !fileRecord.isTransferStatus(FileRecord.TransferStatus.completed);
                                     }
                                     // Heal files that completed under another chat's (stale) record but
                                     // were never transferred: re-running startDownload pins the record to

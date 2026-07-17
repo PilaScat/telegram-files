@@ -84,6 +84,10 @@ public class DataVerticle extends AbstractVerticle {
                 // Best-effort — a failure (e.g. an exotic legacy schema) is logged, never fatal.
                 .compose(r -> fileRepository.deduplicateByUniqueId()
                         .recover(_ -> Future.succeededFuture(0)))
+                // Archived (transferred) records must read 'completed', or the boot rescan
+                // re-downloads them. Best-effort like the dedup pass.
+                .compose(r -> fileRepository.repairTransferredRecords()
+                        .recover(_ -> Future.succeededFuture(0)))
                 .onSuccess(r -> {
                     log.info("Database {} initialized.", Config.DB_TYPE);
                     stopPromise.complete();
@@ -125,7 +129,9 @@ public class DataVerticle extends AbstractVerticle {
 
         return createPool(vertx,
                 Config.isSqlite() ? new JDBCConnectOptions()
-                        .setJdbcUrl("jdbc:sqlite:%s?journal_mode=WAL&busy_timeout=30000&synchronous=NORMAL&cache_size=-2000".formatted(getDataPath())) :
+                        // journal_size_limit keeps the WAL from growing unbounded under sustained
+                        // write load (it reached 768MB during the re-download storm).
+                        .setJdbcUrl("jdbc:sqlite:%s?journal_mode=WAL&busy_timeout=30000&synchronous=NORMAL&cache_size=-2000&journal_size_limit=67108864".formatted(getDataPath())) :
                         sqlConnectOptions,
                 poolOptions);
     }
