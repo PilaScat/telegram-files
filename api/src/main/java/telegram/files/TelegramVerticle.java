@@ -1202,7 +1202,11 @@ public class TelegramVerticle extends AbstractVerticle {
                         }
                     });
 
-            if (completionDate != null || lastFileEventTime == 0 || System.currentTimeMillis() - lastFileEventTime > 1000) {
+            // Rate-limit ALL raw file events, including completed ones: TDLib re-emits
+            // UpdateFile(completed) for every entry of its persistent download list, and an
+            // unthrottled bypass flooded the event bus (100k+ discarded events/hour). The
+            // completion itself is announced separately via the TYPE_FILE_STATUS event.
+            if (lastFileEventTime == 0 || System.currentTimeMillis() - lastFileEventTime > 1000) {
                 sendEvent(EventPayload.build(EventPayload.TYPE_FILE, updateFile));
                 lastFileEventTime = System.currentTimeMillis();
             }
