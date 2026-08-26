@@ -21,9 +21,38 @@ import useIsMobile from "@/hooks/use-is-mobile";
 import * as SliderPrimitive from "@radix-ui/react-slider";
 import { SafeBottomWrapper } from "@/components/safe-bottom-wrapper";
 
+const checkVideoSupport = (mimeType: string): "probably" | "maybe" | "" => {
+  const video = document.createElement("video");
+  return video.canPlayType(mimeType);
+};
+
+const BROWSER_LIMITED_FORMATS: Record<string, string> = {
+  "video/quicktime": "QuickTime plays reliably only in Safari",
+  "video/mp2t": "MPEG-TS is not supported by browsers, download it and use VLC",
+  "video/x-matroska": "MKV support is limited in some browsers",
+};
+
+const PLAYBACK_ERRORS: Record<number, string> = {
+  1: "Playback aborted",
+  2: "Network error",
+  3: "Decode error",
+};
+
+const getMimeType = (file: TelegramFile): string => {
+  if (file.mimeType) {
+    return file.mimeType;
+  }
+
+  if (file.extra && "mimeType" in file.extra) {
+    return file.extra.mimeType;
+  }
+
+  return "video/mp4";
+};
+
 const VideoErrorFallback = ({
   className = "",
-  message = "Video loading failed!",
+  message = "Video loading failed",
 }) => (
   <div
     className={`flex flex-col items-center justify-center rounded bg-gray-100 p-4 ${className}`}
@@ -35,20 +64,35 @@ const VideoErrorFallback = ({
 
 const Slider = React.forwardRef<
   React.ComponentRef<typeof SliderPrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
->(({ className, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root> & {
+    isMobile?: boolean;
+  }
+>(({ className, isMobile = false, ...props }, ref) => (
   <SliderPrimitive.Root
     ref={ref}
     className={cn(
       "relative flex w-full touch-none select-none items-center",
+      isMobile && "py-4",
       className,
     )}
     {...props}
   >
-    <SliderPrimitive.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-gray-600/40">
+    <SliderPrimitive.Track
+      className={cn(
+        "relative w-full grow overflow-hidden rounded-full bg-gray-600/40",
+        isMobile ? "h-2" : "h-1.5",
+      )}
+    >
       <SliderPrimitive.Range className="absolute h-full bg-white" />
     </SliderPrimitive.Track>
-    <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border-4 border-white bg-background shadow transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50" />
+    <SliderPrimitive.Thumb
+      className={cn(
+        "block rounded-full border-4 border-white bg-background shadow transition-all",
+        isMobile ? "h-6 w-6 active:scale-110" : "h-4 w-4",
+        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "disabled:pointer-events-none disabled:opacity-50",
+      )}
+    />
   </SliderPrimitive.Root>
 ));
 
@@ -250,19 +294,25 @@ const MobileControls = ({
   };
 
   return (
-    <div className="space-y-4" onClick={(e) => e.stopPropagation()}>
+    <div className="space-y-6" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center justify-between px-4">
         <span className="text-sm text-white">{formatTime(currentTime)}</span>
         <span className="text-sm text-white">{formatTime(duration)}</span>
       </div>
 
-      <Slider
-        value={[currentTime]}
-        max={duration}
-        step={0.1}
-        className="w-full cursor-pointer"
-        onValueChange={(value) => value[0] && onSeek(value[0])}
-      />
+      <div
+        onTouchStart={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Slider
+          isMobile={true}
+          value={[currentTime]}
+          max={duration}
+          step={0.1}
+          className="w-full cursor-pointer"
+          onValueChange={(value) => value[0] && onSeek(value[0])}
+        />
+      </div>
 
       <div className="flex items-center justify-center gap-8">
         <Button
@@ -335,8 +385,17 @@ const FileVideo = ({
   const [isPreviewReady, setIsPreviewReady] = useState(false);
   const [error, setError] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [formatWarning, setFormatWarning] = useState<string | null>(null);
 
   const url = `${getApiUrl()}/${file.telegramId}/file/${file.uniqueId}`;
+  const mimeType = getMimeType(file);
+
+  useEffect(() => {
+    const limitation = BROWSER_LIMITED_FORMATS[mimeType];
+    setFormatWarning(
+      checkVideoSupport(mimeType) === "" && limitation ? limitation : null,
+    );
+  }, [mimeType]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -472,30 +531,22 @@ const FileVideo = ({
   const handleError = (e: React.SyntheticEvent<HTMLVideoElement>) => {
     setError(true);
     const videoElement = e.currentTarget;
-    console.error("Video playback error：", {
+    console.error("Video playback error:", {
       code: videoElement.error?.code,
       message: videoElement.error?.message,
       src: videoElement.currentSrc,
+      mimeType: mimeType,
     });
-    // Set a user-friendly error message based on the error code
-    let message = "Video loading failed！";
-    if (videoElement.error) {
-      switch (videoElement.error.code) {
-        case 1:
-          message = "ABORTED";
-          break;
-        case 2:
-          message = "NETWORK ERROR";
-          break;
-        case 3:
-          message = "DECODE ERROR";
-          break;
-        case 4:
-          message = "SRC NOT SUPPORTED";
-          break;
-        default:
-          message = "UNKNOWN ERROR";
+    let message = "Video loading failed";
+    const code = videoElement.error?.code;
+    if (code === 4) {
+      const limitation = BROWSER_LIMITED_FORMATS[mimeType];
+      message = `Unsupported format (${mimeType})`;
+      if (limitation) {
+        message += ` — ${limitation}`;
       }
+    } else if (code !== undefined && PLAYBACK_ERRORS[code]) {
+      message = PLAYBACK_ERRORS[code];
     }
     setErrorMessage(message);
   };
@@ -595,6 +646,12 @@ const FileVideo = ({
       {loading && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
           <Loader2 className="h-12 w-12 animate-spin text-white" />
+        </div>
+      )}
+
+      {formatWarning && !error && (
+        <div className="absolute left-0 right-0 top-0 z-20 bg-yellow-500/90 px-4 py-2 text-center text-sm text-black">
+          {formatWarning}
         </div>
       )}
 
