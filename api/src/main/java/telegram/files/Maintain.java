@@ -6,6 +6,7 @@ import cn.hutool.log.LogFactory;
 import io.vertx.core.Vertx;
 import telegram.files.maintains.AlbumCaptionMaintainVerticle;
 import telegram.files.maintains.MaintainVerticle;
+import telegram.files.maintains.OrphanCleanupMaintainVerticle;
 import telegram.files.maintains.ThumbnailMaintainVerticle;
 
 public class Maintain {
@@ -24,6 +25,7 @@ public class Maintain {
             System.out.println("Maintain names:");
             System.out.println("  album-caption");
             System.out.println("  thumbnail");
+            System.out.println("  orphan-cleanup [--apply]");
             System.exit(1);
         }
 
@@ -44,6 +46,14 @@ public class Maintain {
                     MessyUtils.await(vertx.deployVerticle(maintainVerticle, Config.VIRTUAL_THREAD_DEPLOYMENT_OPTIONS)
                             .onFailure(err -> {
                                 log.error("Failed to deploy thumbnail maintain verticle", err);
+                                System.exit(1);
+                            }));
+                }
+                case "orphan-cleanup" -> {
+                    maintainVerticle = new OrphanCleanupMaintainVerticle(ArrayUtil.contains(args, "--apply"));
+                    MessyUtils.await(vertx.deployVerticle(maintainVerticle, Config.VIRTUAL_THREAD_DEPLOYMENT_OPTIONS)
+                            .onFailure(err -> {
+                                log.error("Failed to deploy orphan cleanup maintain verticle", err);
                                 System.exit(1);
                             }));
                 }
