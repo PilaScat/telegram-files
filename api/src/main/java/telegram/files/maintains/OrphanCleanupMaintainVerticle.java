@@ -16,6 +16,7 @@ import telegram.files.repository.FileRecord;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -24,6 +25,10 @@ import java.util.Optional;
  */
 public class OrphanCleanupMaintainVerticle extends MaintainVerticle {
 
+    private static final long AUTHORIZATION_TIMEOUT = 120 * 1000;
+
+    private static final long AUTHORIZATION_POLL_INTERVAL = 500;
+
     private final boolean apply;
 
     private volatile int scanned = 0;
@@ -31,6 +36,8 @@ public class OrphanCleanupMaintainVerticle extends MaintainVerticle {
     private volatile int orphans = 0;
 
     private volatile int removed = 0;
+
+    private volatile int failed = 0;
 
     private volatile long freedBytes = 0;
 
@@ -47,6 +54,16 @@ public class OrphanCleanupMaintainVerticle extends MaintainVerticle {
         timeInterval.start();
         log.info("🔨 Start to clean up orphan cache files%s".formatted(apply ? "" : " (dry run)"));
         try {
+            if (!awaitAuthorization()) {
+                log.error("""
+                        🔨 No telegram account became authorized within %d seconds, so no file could be checked.
+                        🔨 TDLib only answers GetFile once its own initialization has completed, and its database
+                        🔨 cannot be opened twice: stop the running telegram-files container and run this again."""
+                        .formatted(AUTHORIZATION_TIMEOUT / 1000));
+                super.end(false, new IllegalStateException("No authorized telegram account"));
+                return;
+            }
+
             long fromMessageId = 0;
             while (true) {
                 List<FileRecord> rows = Future.await(SqlTemplate.forQuery(DataVerticle.pool, """
@@ -72,27 +89,65 @@ public class OrphanCleanupMaintainVerticle extends MaintainVerticle {
                 fromMessageId = rows.getLast().messageId();
             }
 
-            log.info("✅ Scanned %d transferred records, %d had a cache copy, %d removed, %s freed. Time consumed: %s"
-                    .formatted(scanned, orphans, removed, FileUtil.readableFileSize(freedBytes), timeInterval.intervalPretty()));
-            if (!apply && orphans > 0) {
-                log.info("✅ Dry run: nothing was deleted. Re-run with --apply to remove them.");
-            }
-            super.end(true, null);
+            report();
+            super.end(failed < scanned, null);
         } catch (Exception e) {
             log.error("🔨 Failed to clean up orphan cache files", e);
             super.end(false, e);
         }
     }
 
+    private void report() {
+        int checked = scanned - failed;
+        if (failed > 0) {
+            log.error("🔨 %d of %d transferred records could not be checked against TDLib, and were left alone."
+                    .formatted(failed, scanned));
+        }
+        if (checked == 0) {
+            log.error("🔨 No record could be checked, so nothing is known about cache copies. Time consumed: %s"
+                    .formatted(timeInterval.intervalPretty()));
+            return;
+        }
+        log.info("✅ Checked %d of %d transferred records, %d had a cache copy, %d removed, %s freed. Time consumed: %s"
+                .formatted(checked, scanned, orphans, removed, FileUtil.readableFileSize(freedBytes), timeInterval.intervalPretty()));
+        if (!apply && orphans > 0) {
+            log.info("✅ Dry run: nothing was deleted. Re-run with --apply to remove them.");
+        }
+    }
+
+    private boolean awaitAuthorization() {
+        long deadline = System.currentTimeMillis() + AUTHORIZATION_TIMEOUT;
+        while (System.currentTimeMillis() < deadline) {
+            if (TelegramVerticles.getAll().stream().anyMatch(t -> t.authorized)) {
+                return true;
+            }
+            try {
+                Thread.sleep(AUTHORIZATION_POLL_INTERVAL);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
     private void handleRecord(FileRecord fileRecord) {
         Optional<TelegramVerticle> telegramVerticleOptional = TelegramVerticles.get(fileRecord.telegramId());
-        if (telegramVerticleOptional.isEmpty()) {
+        if (telegramVerticleOptional.isEmpty() || !telegramVerticleOptional.get().authorized) {
+            failed++;
             return;
         }
         TelegramVerticle telegramVerticle = telegramVerticleOptional.get();
         try {
             TdApi.File file = Future.await(telegramVerticle.client.execute(new TdApi.GetFile(fileRecord.id())));
-            String cachePath = file == null || file.local == null ? null : file.local.path;
+            if (file == null || file.remote == null || !Objects.equals(file.remote.uniqueId, fileRecord.uniqueId())) {
+                log.warn("🔨 TDLib file id %d no longer refers to %s, skipping"
+                        .formatted(fileRecord.id(), fileRecord.uniqueId()));
+                failed++;
+                return;
+            }
+
+            String cachePath = file.local == null ? null : file.local.path;
             if (!isCacheCopy(cachePath)) {
                 return;
             }
@@ -115,7 +170,8 @@ public class OrphanCleanupMaintainVerticle extends MaintainVerticle {
             removed++;
             freedBytes += size;
         } catch (Exception e) {
-            log.error(e, "🔨 Failed to clean up file unique id: %s".formatted(fileRecord.uniqueId()));
+            failed++;
+            log.error(e, "🔨 Failed to check file unique id: %s".formatted(fileRecord.uniqueId()));
         }
     }
 
