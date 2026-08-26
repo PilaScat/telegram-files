@@ -26,6 +26,7 @@ public class Start {
     private static final HttpVerticle httpVerticle = new HttpVerticle();
 
     public static void main(String[] args) {
+        AppInstanceLock.hold();
         registerShutdownHooks();
         deployVerticles();
     }

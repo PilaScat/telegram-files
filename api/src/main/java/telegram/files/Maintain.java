@@ -30,6 +30,14 @@ public class Maintain {
         }
 
         String maintainName = args[0];
+
+        if (AppInstanceLock.isApplicationRunning()) {
+            System.out.println("telegram-files is still running.");
+            System.out.println("Maintenance tasks open the same database and the same TDLib account directory,");
+            System.out.println("so they must not run alongside it. Stop the container, run the task, start it again.");
+            System.exit(1);
+        }
+
         try {
             MaintainVerticle maintainVerticle = null;
             switch (maintainName) {

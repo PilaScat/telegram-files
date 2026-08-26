@@ -25,7 +25,7 @@ import java.util.Optional;
  */
 public class OrphanCleanupMaintainVerticle extends MaintainVerticle {
 
-    private static final long AUTHORIZATION_TIMEOUT = 120 * 1000;
+    private static final long AUTHORIZATION_TIMEOUT = 30 * 1000;
 
     private static final long AUTHORIZATION_POLL_INTERVAL = 500;
 
@@ -57,8 +57,7 @@ public class OrphanCleanupMaintainVerticle extends MaintainVerticle {
             if (!awaitAuthorization()) {
                 log.error("""
                         🔨 No telegram account became authorized within %d seconds, so no file could be checked.
-                        🔨 TDLib only answers GetFile once its own initialization has completed, and its database
-                        🔨 cannot be opened twice: stop the running telegram-files container and run this again."""
+                        🔨 TDLib only answers GetFile once its authorization handshake has completed."""
                         .formatted(AUTHORIZATION_TIMEOUT / 1000));
                 super.end(false, new IllegalStateException("No authorized telegram account"));
                 return;
