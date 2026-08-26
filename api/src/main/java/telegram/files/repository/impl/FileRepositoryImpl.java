@@ -62,16 +62,22 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                         return this.updateAlbumDataByMediaAlbumId(fileRecord.mediaAlbumId(), fileRecord.caption(), fileRecord.reactionCount()).map(r);
                     }
                 })
-                .onSuccess(r -> log.trace("Successfully created file record: %s".formatted(fileRecord.id())))
-                .onFailure(err -> {
-                    String msg = err.getMessage();
-                    if (msg != null && (msg.contains("constraint") || msg.toLowerCase().contains("duplicate"))) {
-                        // Concurrent create for the same file lost the race (composite PK already exists).
-                        log.debug("File record already exists (create race): %s".formatted(fileRecord.uniqueId()));
-                    } else {
-                        log.error("Failed to create file record: %s".formatted(msg));
-                    }
-                });
+                .onSuccess(r -> log.trace("Successfully created file record: %s".formatted(fileRecord.id())));
+    }
+
+    private Future<Boolean> createTolerantOfRace(FileRecord fileRecord) {
+        return this.create(fileRecord)
+                .map(true)
+                .recover(err -> this.getByUniqueId(fileRecord.uniqueId())
+                        .compose(record -> {
+                            if (record != null) {
+                                log.debug("File record already exists (create race): %s".formatted(fileRecord.uniqueId()));
+                                return Future.succeededFuture(false);
+                            }
+                            log.error(err, "Failed to create file record: %s".formatted(fileRecord.uniqueId()));
+                            return Future.failedFuture(err);
+                        })
+                );
     }
 
     @Override
@@ -81,10 +87,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
                     if (record != null) {
                         return Future.succeededFuture(false);
                     }
-                    // Recover from a lost create race (another concurrent caller inserted it first) so
-                    // the caller still proceeds instead of failing the whole download.
-                    return this.create(fileRecord).map(true)
-                            .recover(_ -> Future.succeededFuture(false));
+                    return this.createTolerantOfRace(fileRecord);
                 });
     }
 
@@ -93,8 +96,7 @@ public class FileRepositoryImpl extends AbstractSqlRepository implements FileRep
         return this.getByUniqueId(fileRecord.uniqueId())
                 .compose(record -> {
                     if (record == null) {
-                        return this.create(fileRecord).map(true)
-                                .recover(_ -> Future.succeededFuture(false));
+                        return this.createTolerantOfRace(fileRecord);
                     }
                     boolean refresh;
                     if (pinSource) {
